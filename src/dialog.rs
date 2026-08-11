@@ -258,7 +258,11 @@ pub struct VariantOption {
     pub name: String,
 }
 
-pub fn model_options(providers: &[ProviderInfo], query: &str) -> Vec<ModelOption> {
+pub fn model_options(
+    providers: &[ProviderInfo],
+    recent_models: &[ModelRef],
+    query: &str,
+) -> Vec<ModelOption> {
     let mut options = providers
         .iter()
         .flat_map(|provider| {
@@ -291,8 +295,15 @@ pub fn model_options(providers: &[ProviderInfo], query: &str) -> Vec<ModelOption
         .collect::<Vec<_>>();
 
     options.sort_by(|left, right| {
-        left.provider_name
-            .cmp(&right.provider_name)
+        let recent_index = |option: &ModelOption| {
+            recent_models.iter().position(|model| {
+                model.provider_id == option.provider_id && model.id == option.model_id
+            })
+        };
+        recent_index(left)
+            .unwrap_or(usize::MAX)
+            .cmp(&recent_index(right).unwrap_or(usize::MAX))
+            .then_with(|| left.provider_name.cmp(&right.provider_name))
             .then_with(|| left.model_name.cmp(&right.model_name))
             .then_with(|| left.provider_id.cmp(&right.provider_id))
             .then_with(|| left.model_id.cmp(&right.model_id))
@@ -428,10 +439,23 @@ mod tests {
             },
         ];
 
-        let all = model_options(&providers, "");
+        let all = model_options(&providers, &[], "");
         assert_eq!(all[0].model_id, "model-a");
         assert_eq!(all[0].provider_id, "provider-a");
-        assert_eq!(model_options(&providers, "zeta")[0].model_id, "model-z");
+        assert_eq!(
+            model_options(&providers, &[], "zeta")[0].model_id,
+            "model-z"
+        );
+
+        let recent = vec![ModelRef {
+            id: "model-z".to_owned(),
+            provider_id: "provider-b".to_owned(),
+            ..ModelRef::default()
+        }];
+        assert_eq!(
+            model_options(&providers, &recent, "")[0].model_id,
+            "model-z"
+        );
     }
 
     #[test]

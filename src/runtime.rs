@@ -99,6 +99,10 @@ pub enum ApiRequest {
     },
     ShareSession(String),
     UnshareSession(String),
+    CompactSession {
+        session_id: String,
+        model: crate::model::ModelRef,
+    },
     Submit {
         session_id: Option<String>,
         request: Box<PromptRequest>,
@@ -207,6 +211,10 @@ pub enum ApiResult {
     ForkedSession(Result<Session, String>),
     SharedSession(Result<Session, String>),
     UnsharedSession(Result<Session, String>),
+    CompactedSession {
+        session_id: String,
+        result: Result<bool, String>,
+    },
     Exported {
         result: Result<PathBuf, String>,
     },
@@ -447,6 +455,13 @@ pub async fn execute_request(client: Arc<ApiClient>, request: ApiRequest) -> Api
                 .await
                 .map_err(|error| error.to_string()),
         ),
+        ApiRequest::CompactSession { session_id, model } => ApiResult::CompactedSession {
+            result: client
+                .summarize_session(&session_id, &model)
+                .await
+                .map_err(|error| error.to_string()),
+            session_id,
+        },
         ApiRequest::Submit {
             session_id,
             request,

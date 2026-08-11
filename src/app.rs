@@ -18,7 +18,7 @@ use crate::model::{
 };
 use crate::notification_state::NotificationState;
 use crate::pending_state::PendingState;
-use crate::prompt_state::{PromptPanelItem, PromptState};
+use crate::prompt_state::{PromptPanelItem, PromptState, PromptSubmission};
 use crate::runtime::{ApiRequest, ApiResult, AppMsg, Effect, SessionSnapshot};
 use crate::runtime_state::RuntimeState;
 use crate::scroll::{ScrollAnchor, ScrollState};
@@ -240,6 +240,14 @@ impl App {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return vec![Effect::Quit];
         }
+        if key.code == KeyCode::Char('?')
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+        {
+            self.overlay = Some(OverlayState::Help);
+            return Vec::new();
+        }
         if self.overlay.is_some() {
             return self.handle_overlay_key(key);
         }
@@ -308,7 +316,7 @@ impl App {
             }
             "server.instance.disposed" => {
                 self.runtime.mark_disconnected();
-                self.runtime.working = false;
+                self.runtime.set_working(false);
                 self.notifications
                     .set("OpenCode instance was disposed".to_owned());
                 let mut effects = vec![
@@ -375,7 +383,8 @@ impl App {
                         self.session.current_session = None;
                         self.transcript.clear();
                         self.integrations.clear_session_panels();
-                        self.runtime.working = false;
+                        self.runtime.set_working(false);
+                        self.runtime.reset_response();
                         self.sidebar_scroll.reset();
                         self.session.screen = Screen::Home;
                     }
@@ -393,7 +402,16 @@ impl App {
                         .cloned()
                         .unwrap_or(Value::Null);
                     if let Ok(status) = serde_json::from_value::<SessionStatus>(status_value) {
+                        let idle = matches!(status, SessionStatus::Idle);
+                        let became_idle = idle
+                            && self
+                                .runtime
+                                .session_statuses
+                                .get(&session_id)
+                                .map(SessionStatus::is_working)
+                                .unwrap_or(self.runtime.working);
                         self.runtime.set_session_status(session_id, status.clone());
+                        self.runtime.set_working(status.is_working());
                         if let SessionStatus::Retry { message, .. } = status {
                             self.notifications.warning(if message.is_empty() {
                                 "Retrying session".to_owned()
@@ -401,8 +419,11 @@ impl App {
                                 message
                             });
                         }
+                        if became_idle {
+                            return self.dispatch_next_queued_prompt();
+                        }
                     } else {
-                        self.runtime.working = true;
+                        self.runtime.set_working(true);
                     }
                 }
                 Vec::new()
@@ -488,7 +509,8 @@ impl App {
                 if let ServerEventData::SessionNextPrompted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
+                    self.runtime.set_response_input(&payload.prompt.text);
                     self.transcript.append_event_message(
                         &payload.session_id,
                         &payload.message_id,
@@ -504,7 +526,8 @@ impl App {
                 if let ServerEventData::SessionNextPromptAdmitted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
+                    self.runtime.set_response_input(&payload.prompt.text);
                     self.touch_session(&payload.session_id, payload.timestamp);
                     self.notifications.set(format!(
                         "Prompt {} admitted ({}) [files={}, agents={}]",
@@ -550,7 +573,7 @@ impl App {
                 if let ServerEventData::SessionNextRetried(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
                     self.touch_session(&payload.session_id, payload.timestamp);
                     self.notifications.set(format!(
                         "Retrying attempt {}: {}",
@@ -597,7 +620,7 @@ impl App {
             "permission.asked" => {
                 if let Some(request) = parse_permission_request(&event.properties) {
                     if self.is_current_session(&request.session_id) {
-                        self.runtime.working = true;
+                        self.runtime.set_working(true);
                     }
                     self.upsert_permission(request);
                 }
@@ -612,7 +635,7 @@ impl App {
             "question.asked" => {
                 if let Some(request) = parse_question_request(&event.properties) {
                     if self.is_current_session(&request.session_id) {
-                        self.runtime.working = true;
+                        self.runtime.set_working(true);
                     }
                     self.upsert_question(request);
                 }
@@ -628,6 +651,10 @@ impl App {
                 if let ServerEventData::MessageUpdated(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
+                    if payload.info.role == "assistant" {
+                        self.runtime
+                            .update_response_tokens(&payload.info.id, payload.info.tokens.clone());
+                    }
                     self.upsert_message_info(payload.info.clone());
                 }
                 Vec::new()
@@ -664,7 +691,9 @@ impl App {
                 if let ServerEventData::SessionNextStepStarted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
+                    self.runtime
+                        .set_response_message(&payload.assistant_message_id);
                     self.transcript.start_assistant(
                         &payload.session_id,
                         &payload.assistant_message_id,
@@ -680,7 +709,9 @@ impl App {
                 if let ServerEventData::SessionNextTextStarted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
+                    self.runtime
+                        .set_response_message(&payload.assistant_message_id);
                     self.transcript.start_text(
                         &payload.session_id,
                         &payload.assistant_message_id,
@@ -701,6 +732,7 @@ impl App {
                         payload.timestamp,
                         &payload.delta,
                     );
+                    self.runtime.add_response_output(&payload.delta);
                 }
                 Vec::new()
             }
@@ -735,7 +767,11 @@ impl App {
                         }),
                         payload.timestamp,
                     );
-                    self.runtime.working = false;
+                    self.runtime.finish_response_tokens(
+                        &payload.assistant_message_id,
+                        payload.tokens.clone(),
+                    );
+                    self.runtime.set_working(false);
                     return self.refresh_current_effect();
                 }
                 Vec::new()
@@ -750,7 +786,7 @@ impl App {
                         &payload.error.message,
                         payload.timestamp,
                     );
-                    self.runtime.working = false;
+                    self.runtime.set_working(false);
                     self.notifications.set(payload.error.message.clone());
                     return self.refresh_current_effect();
                 }
@@ -760,7 +796,7 @@ impl App {
                 if let ServerEventData::SessionNextCompactionStarted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
                     self.notifications
                         .set(format!("Compacting context ({})", payload.reason));
                     self.transcript.start_compaction(
@@ -798,6 +834,7 @@ impl App {
                     );
                     self.notifications
                         .set(format!("Context compaction completed ({})", payload.reason));
+                    self.runtime.set_working(false);
                 }
                 Vec::new()
             }
@@ -805,7 +842,9 @@ impl App {
                 if let ServerEventData::SessionNextReasoningStarted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
+                    self.runtime
+                        .set_response_message(&payload.assistant_message_id);
                     self.transcript.start_reasoning(
                         &payload.session_id,
                         &payload.assistant_message_id,
@@ -826,6 +865,7 @@ impl App {
                         payload.timestamp,
                         &payload.delta,
                     );
+                    self.runtime.add_response_output(&payload.delta);
                 }
                 Vec::new()
             }
@@ -847,7 +887,7 @@ impl App {
                 if let ServerEventData::SessionNextShellStarted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
                     self.notifications
                         .set(format!("Running {}", payload.command));
                     self.transcript.start_shell(
@@ -876,7 +916,7 @@ impl App {
                 if let ServerEventData::SessionNextToolInputStarted(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
                     self.transcript.start_tool(
                         &payload.session_id,
                         &payload.assistant_message_id,
@@ -924,7 +964,7 @@ impl App {
                         &payload.tool,
                         payload.timestamp,
                     );
-                    self.runtime.working = true;
+                    self.runtime.set_working(true);
                     self.notifications.set(format!("Running {}", payload.tool));
                     self.transcript.set_tool_state(
                         &payload.assistant_message_id,
@@ -1204,12 +1244,13 @@ impl App {
                 match result {
                     Ok(statuses) => {
                         self.runtime.replace_session_statuses(statuses);
-                        self.runtime.working = self
+                        let working = self
                             .session
                             .current_session
                             .as_ref()
                             .and_then(|session| self.runtime.session_statuses.get(&session.id))
                             .is_some_and(SessionStatus::is_working);
+                        self.runtime.set_working(working);
                     }
                     Err(error) => self
                         .notifications
@@ -1432,7 +1473,6 @@ impl App {
                         if self.is_current_session(&snapshot.session.id) {
                             let session_id = snapshot.session.id.clone();
                             self.apply_snapshot(snapshot);
-                            self.runtime.working = false;
                             return vec![
                                 Effect::Api(ApiRequest::ListSessionTodos(session_id.clone())),
                                 Effect::Api(ApiRequest::ListSessionDiff(session_id.clone())),
@@ -1591,6 +1631,26 @@ impl App {
                     Vec::new()
                 }
             },
+            ApiResult::CompactedSession { session_id, result } => {
+                if self.is_current_session(&session_id) {
+                    match result {
+                        Ok(true) => self
+                            .notifications
+                            .set("Session compaction requested".to_owned()),
+                        Ok(false) => {
+                            self.runtime.set_working(false);
+                            self.notifications
+                                .set("Session compaction was not started".to_owned());
+                        }
+                        Err(error) => {
+                            self.runtime.set_working(false);
+                            self.notifications
+                                .set(format!("Compaction failed: {error}"));
+                        }
+                    }
+                }
+                Vec::new()
+            }
             ApiResult::Exported { result } => match result {
                 Ok(path) => {
                     self.notifications
@@ -1613,12 +1673,12 @@ impl App {
                             self.session.screen = Screen::Session;
                         }
                         self.prompt.clear_pending();
-                        self.runtime.working = true;
+                        self.runtime.set_working(true);
                         self.notifications.set("Prompt sent".to_owned());
                     }
                     Err(error) => {
                         self.prompt.restore_pending();
-                        self.runtime.working = false;
+                        self.runtime.set_working(false);
                         self.notifications.set(format!("Prompt failed: {error}"));
                     }
                 }
@@ -1627,7 +1687,7 @@ impl App {
             ApiResult::Aborted(result) => {
                 match result {
                     Ok(()) => {
-                        self.runtime.working = false;
+                        self.runtime.set_working(false);
                         self.notifications.set("Abort requested".to_owned());
                     }
                     Err(error) => self.notifications.set(format!("Abort failed: {error}")),
@@ -2003,6 +2063,7 @@ impl App {
                                     selected: 0,
                                 })
                             }
+                            SlashCommand::Compact => return self.compact_current_session(),
                             SlashCommand::Timeline => self.open_timeline(),
                             SlashCommand::Fork => self.open_fork_session(),
                             SlashCommand::Share => return self.share_current_session(),
@@ -3740,6 +3801,7 @@ impl App {
                     Vec::new()
                 }
             }
+            "compact_session" => self.compact_current_session(),
             "select_model" => {
                 self.overlay = Some(OverlayState::Model {
                     query: String::new(),
@@ -3931,7 +3993,7 @@ impl App {
                 matching_commands_with_server(query, &self.catalog.commands).len()
             }
             Some(OverlayState::Model { query, selected: _ }) => {
-                model_options(&self.catalog.providers, query).len()
+                model_options(&self.catalog.providers, &self.catalog.recent_models, query).len()
             }
             Some(OverlayState::Skill { query, selected: _ }) => {
                 skill_options(&self.catalog.skills, query).len()
@@ -3984,9 +4046,10 @@ impl App {
         let Some(OverlayState::Model { query, selected }) = self.overlay.as_ref() else {
             return;
         };
-        let Some(option) = model_options(&self.catalog.providers, query)
-            .get(*selected)
-            .cloned()
+        let Some(option) =
+            model_options(&self.catalog.providers, &self.catalog.recent_models, query)
+                .get(*selected)
+                .cloned()
         else {
             self.notifications.set("No matching models".to_owned());
             return;
@@ -4077,6 +4140,31 @@ impl App {
                     })
                 })
             })
+    }
+
+    fn compact_current_session(&mut self) -> Vec<Effect> {
+        let Some(session_id) = self
+            .session
+            .current_session
+            .as_ref()
+            .map(|session| session.id.clone())
+        else {
+            self.notifications
+                .set("Open a session before compacting its context".to_owned());
+            return Vec::new();
+        };
+        let Some(model) = self.active_model_ref() else {
+            self.notifications
+                .set("Select a model before compacting the session".to_owned());
+            return Vec::new();
+        };
+        self.runtime.set_working(true);
+        self.notifications
+            .set("Requesting session compaction...".to_owned());
+        vec![Effect::Api(ApiRequest::CompactSession {
+            session_id,
+            model,
+        })]
     }
 
     fn sync_slash_overlay(&mut self) {
@@ -4236,11 +4324,6 @@ impl App {
     }
 
     fn submit(&mut self, prompt: String) -> Vec<Effect> {
-        if self.runtime.working {
-            self.notifications
-                .set("Session is still working".to_owned());
-            return Vec::new();
-        }
         let prompt = prompt.trim().to_owned();
         if prompt.is_empty()
             && self.prompt.attachments.is_empty()
@@ -4285,11 +4368,68 @@ impl App {
             .then(|| self.prompt.options.tool_overrides.clone());
         request.system = self.prompt.options.system.clone();
         request.output_format = self.prompt.options.output_format.clone();
+        let submission = PromptSubmission {
+            session_id,
+            request,
+            prompt,
+            attachments,
+            subtasks,
+        };
+        self.prompt.composer.clear();
+        if self.current_session_is_working() {
+            self.prompt.enqueue(submission);
+            self.notifications.set(format!(
+                "Prompt queued ({} waiting)",
+                self.prompt.queued_len()
+            ));
+            return Vec::new();
+        }
+        self.dispatch_prompt(submission, false)
+    }
+
+    fn current_session_is_working(&self) -> bool {
+        self.session
+            .current_session
+            .as_ref()
+            .and_then(|session| self.runtime.session_statuses.get(&session.id))
+            .is_some_and(SessionStatus::is_working)
+            || self.runtime.working
+    }
+
+    fn dispatch_next_queued_prompt(&mut self) -> Vec<Effect> {
+        let Some(session_id) = self
+            .session
+            .current_session
+            .as_ref()
+            .map(|session| session.id.clone())
+        else {
+            return Vec::new();
+        };
+        let Some(submission) = self.prompt.dequeue_for_session(&session_id) else {
+            return Vec::new();
+        };
+        self.dispatch_prompt(submission, true)
+    }
+
+    fn dispatch_prompt(&mut self, submission: PromptSubmission, queued: bool) -> Vec<Effect> {
+        let PromptSubmission {
+            session_id,
+            request,
+            prompt,
+            attachments,
+            subtasks,
+        } = submission;
         self.prompt
             .stage_submission(prompt.clone(), attachments, subtasks);
-        self.prompt.composer.clear();
-        self.runtime.working = true;
-        self.notifications.set("Sending prompt...".to_owned());
+        self.runtime.begin_response(&prompt);
+        self.notifications.set(if queued {
+            format!(
+                "Sending queued prompt ({} waiting)",
+                self.prompt.queued_len()
+            )
+        } else {
+            "Sending prompt...".to_owned()
+        });
         vec![Effect::Api(ApiRequest::Submit {
             session_id,
             request: Box::new(request),
@@ -4329,7 +4469,8 @@ impl App {
         self.transcript.clear();
         self.prompt.clear_queued_parts();
         self.integrations.clear_session_panels();
-        self.runtime.working = false;
+        self.runtime.set_working(false);
+        self.runtime.reset_response();
         self.sidebar_scroll.reset();
         self.session.screen = Screen::Home;
     }
@@ -4406,7 +4547,8 @@ impl App {
         self.session.screen = Screen::Session;
         self.prepare_current_question_draft();
         self.session.opening_session = None;
-        self.runtime.working = false;
+        self.runtime.set_working(false);
+        self.runtime.reset_response();
         self.prompt.clear_queued_parts();
         self.transcript.reset_scroll();
         self.sidebar_scroll.reset();
@@ -4729,15 +4871,31 @@ mod tests {
     use std::sync::Arc;
 
     fn app() -> App {
+        app_with_directory(None)
+    }
+
+    fn app_with_directory(directory: Option<&str>) -> App {
         let client = ApiClient::new(ClientConfig {
             base_url: "http://127.0.0.1:4096".to_owned(),
             username: "opencode".to_owned(),
             password: None,
-            directory: None,
+            directory: directory.map(str::to_owned),
             workspace: None,
         })
         .expect("test client should build");
         App::new(Arc::new(client))
+    }
+
+    #[test]
+    fn question_opens_the_keyboard_help_overlay() {
+        let mut app = app();
+
+        app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('?'),
+            KeyModifiers::SHIFT,
+        ))));
+
+        assert_eq!(app.overlay, Some(OverlayState::Help));
     }
 
     fn timeline_message(id: &str, text: &str, created: i64) -> MessageWithParts {
@@ -4861,6 +5019,52 @@ mod tests {
             KeyModifiers::NONE,
         ))));
         assert_eq!(app.overlay, Some(OverlayState::ForkSession { selected: 0 }));
+    }
+
+    #[test]
+    fn compact_slash_command_uses_the_active_model_and_tracks_failure() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.session.current_session = Some(Session {
+            id: "ses_compact".to_owned(),
+            ..Session::default()
+        });
+        app.catalog.selected_model = Some(ModelRef {
+            provider_id: "provider_1".to_owned(),
+            id: "model_1".to_owned(),
+            ..ModelRef::default()
+        });
+        for character in "/compact".chars() {
+            app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ))));
+        }
+
+        let effects = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiRequest::CompactSession { session_id, model })]
+                if session_id == "ses_compact"
+                    && model.provider_id == "provider_1"
+                    && model.id == "model_1"
+        ));
+        assert!(app.runtime.working);
+        assert!(app.overlay.is_none());
+
+        app.update(AppMsg::Api(Box::new(ApiResult::CompactedSession {
+            session_id: "ses_compact".to_owned(),
+            result: Err("model unavailable".to_owned()),
+        })));
+        assert!(!app.runtime.working);
+        assert_eq!(
+            app.notifications.active(),
+            Some("Compaction failed: model unavailable")
+        );
     }
 
     #[test]
@@ -5297,10 +5501,12 @@ mod tests {
             ..Session::default()
         });
 
-        app.update(AppMsg::Terminal(Event::Paste(
+        let effects = app.update(AppMsg::Terminal(Event::Paste(
             "first\r\nsecond\rthird".to_owned(),
         )));
+        assert!(effects.is_empty());
         assert_eq!(app.prompt.composer.text(), "first\nsecond\nthird");
+        assert!(!app.runtime.working);
 
         app.pending.permissions.push(PermissionRequest {
             id: "per_1".to_owned(),
@@ -5340,6 +5546,108 @@ mod tests {
                     && request.model.is_none()
                     && request.agent.is_none()
         ));
+    }
+
+    #[test]
+    fn prompts_submitted_while_working_are_sent_fifo_when_session_becomes_idle() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.session.current_session = Some(Session {
+            id: "ses_queue".to_owned(),
+            ..Session::default()
+        });
+        app.catalog.selected_model = Some(ModelRef {
+            provider_id: "provider_one".to_owned(),
+            id: "model_one".to_owned(),
+            ..ModelRef::default()
+        });
+        app.runtime
+            .set_session_status("ses_queue", SessionStatus::Busy);
+
+        app.prompt.composer.set_text("first queued");
+        let first_queue_effects = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(first_queue_effects.is_empty());
+        assert_eq!(app.prompt.queued_len(), 1);
+        assert!(app.prompt.composer.is_empty());
+
+        app.catalog.selected_model = Some(ModelRef {
+            provider_id: "provider_two".to_owned(),
+            id: "model_two".to_owned(),
+            ..ModelRef::default()
+        });
+        app.prompt.composer.set_text("second queued");
+        let second_queue_effects = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(second_queue_effects.is_empty());
+        assert_eq!(app.prompt.queued_len(), 2);
+
+        let idle = crate::event::ServerEvent::from_json(json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_queue",
+                "status": { "type": "idle" }
+            }
+        }))
+        .expect("idle status should parse");
+        let first_send = app.handle_server_event(idle);
+        assert!(matches!(
+            first_send.as_slice(),
+            [Effect::Api(ApiRequest::Submit { request, .. })]
+                if request.text_content() == "first queued"
+                    && request.model.as_ref().is_some_and(|model| {
+                        model.provider_id == "provider_one" && model.model_id == "model_one"
+                    })
+        ));
+        assert_eq!(app.prompt.queued_len(), 1);
+        assert!(app.runtime.working);
+
+        let duplicate_idle = crate::event::ServerEvent::from_json(json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_queue",
+                "status": { "type": "idle" }
+            }
+        }))
+        .expect("duplicate idle status should parse");
+        assert!(app.handle_server_event(duplicate_idle).is_empty());
+        assert_eq!(app.prompt.queued_len(), 1);
+
+        app.update(AppMsg::Api(Box::new(ApiResult::Submitted {
+            session: None,
+            result: Ok(()),
+        })));
+        let busy = crate::event::ServerEvent::from_json(json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_queue",
+                "status": { "type": "busy" }
+            }
+        }))
+        .expect("busy status should parse");
+        app.handle_server_event(busy);
+        let idle = crate::event::ServerEvent::from_json(json!({
+            "type": "session.status",
+            "properties": {
+                "sessionID": "ses_queue",
+                "status": { "type": "idle" }
+            }
+        }))
+        .expect("idle status should parse");
+        let second_send = app.handle_server_event(idle);
+        assert!(matches!(
+            second_send.as_slice(),
+            [Effect::Api(ApiRequest::Submit { request, .. })]
+                if request.text_content() == "second queued"
+                    && request.model.as_ref().is_some_and(|model| {
+                        model.provider_id == "provider_two" && model.model_id == "model_two"
+                    })
+        ));
+        assert_eq!(app.prompt.queued_len(), 0);
     }
 
     #[test]
@@ -6583,6 +6891,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("Recent context")
         );
+        assert!(!app.runtime.working);
 
         for event in [
             json!({
@@ -7029,6 +7338,9 @@ mod tests {
             [Effect::Api(ApiRequest::RefreshCurrent(id))] if id == "ses_current"
         ));
         assert!(!app.runtime.working);
+        assert_eq!(app.runtime.response.input_tokens(), 10);
+        assert_eq!(app.runtime.response.output_tokens(), 20);
+        assert!(app.runtime.response.elapsed() >= std::time::Duration::ZERO);
 
         let assistant = app
             .transcript

@@ -1,5 +1,6 @@
 use crate::composer::Composer;
-use crate::model::{PromptOptions, PromptPart};
+use crate::model::{PromptOptions, PromptPart, PromptRequest};
+use std::collections::VecDeque;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromptPanelItem {
@@ -35,6 +36,16 @@ pub struct PromptState {
     pub subtasks: Vec<PromptPart>,
     pub options: PromptOptions,
     pending: Option<PendingPrompt>,
+    queued: VecDeque<PromptSubmission>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PromptSubmission {
+    pub(crate) session_id: Option<String>,
+    pub(crate) request: PromptRequest,
+    pub(crate) prompt: String,
+    pub(crate) attachments: Vec<PromptPart>,
+    pub(crate) subtasks: Vec<PromptPart>,
 }
 
 struct PendingPrompt {
@@ -95,6 +106,22 @@ impl PromptState {
         self.pending = None;
     }
 
+    pub(crate) fn enqueue(&mut self, submission: PromptSubmission) {
+        self.queued.push_back(submission);
+    }
+
+    pub(crate) fn dequeue_for_session(&mut self, session_id: &str) -> Option<PromptSubmission> {
+        self.queued
+            .front()
+            .is_some_and(|submission| submission.session_id.as_deref() == Some(session_id))
+            .then(|| self.queued.pop_front())
+            .flatten()
+    }
+
+    pub fn queued_len(&self) -> usize {
+        self.queued.len()
+    }
+
     pub fn restore_pending(&mut self) {
         let Some(pending) = self.pending.take() else {
             return;
@@ -114,6 +141,7 @@ impl PromptState {
         self.attachments.clear();
         self.subtasks.clear();
         self.clear_pending();
+        self.queued.clear();
     }
 }
 

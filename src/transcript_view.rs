@@ -406,24 +406,13 @@ fn tool_lines(part: &Part, collapsed: bool, palette: &Theme) -> Vec<Line<'static
         return lines;
     }
 
-    // Show input
     if let Some(state) = state {
         if let Some(input) = state.get("input") {
-            // Check if input is a simple string or an object
-            if let Some(input_str) = input.as_str() {
-                if !input_str.is_empty() && input_str.len() < 200 {
-                    lines.push(Line::from(Span::styled(
-                        format!("    input: {input_str}"),
-                        Style::default().fg(palette.markdown_code_block),
-                    )));
-                }
-            } else if input.is_object() {
-                // Show "input" label for object inputs (like command objects)
-                lines.push(Line::from(Span::styled(
-                    "    input".to_string(),
-                    Style::default().fg(palette.markdown_code_block),
-                )));
-            }
+            lines.extend(tool_command_lines(tool_name, input, palette));
+        }
+
+        if let Some(diff) = tool_diff_lines(tool_name, state, palette) {
+            lines.extend(diff);
         }
 
         // Show content array items
@@ -463,6 +452,225 @@ fn tool_lines(part: &Part, collapsed: bool, palette: &Theme) -> Vec<Line<'static
     }
 
     lines
+}
+
+fn tool_command_lines(tool_name: &str, input: &Value, palette: &Theme) -> Vec<Line<'static>> {
+    let parsed;
+    let input = if let Some(raw) = input.as_str() {
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        parsed = serde_json::from_str::<Value>(raw).ok();
+        parsed.as_ref().unwrap_or(input)
+    } else {
+        input
+    };
+
+    let normalized = tool_name.to_ascii_lowercase();
+    if matches!(normalized.as_str(), "bash" | "shell")
+        && let Some(command) = input.get("command").and_then(Value::as_str)
+    {
+        return command
+            .lines()
+            .enumerate()
+            .map(|(index, line)| {
+                Line::from(Span::styled(
+                    if index == 0 {
+                        format!("    $ {line}")
+                    } else {
+                        format!("      {line}")
+                    },
+                    Style::default().fg(palette.markdown_code_block),
+                ))
+            })
+            .collect();
+    }
+
+    if is_file_mutation_tool(&normalized) {
+        let path = input
+            .get("filePath")
+            .and_then(Value::as_str)
+            .filter(|path| !path.is_empty());
+        let replace_all = input.get("replaceAll").and_then(Value::as_bool);
+        let mut command = format!("    command: {tool_name}");
+        if let Some(path) = path {
+            command.push(' ');
+            command.push_str(path);
+        }
+        if let Some(replace_all) = replace_all {
+            command.push_str(&format!(" replaceAll={replace_all}"));
+        }
+        return vec![Line::from(Span::styled(
+            command,
+            Style::default().fg(palette.markdown_code_block),
+        ))];
+    }
+
+    let serialized = match input {
+        Value::String(raw) => raw.clone(),
+        _ => serde_json::to_string(input).unwrap_or_else(|_| input.to_string()),
+    };
+    serialized
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            Line::from(Span::styled(
+                if index == 0 {
+                    format!("    command: {tool_name} {line}")
+                } else {
+                    format!("      {line}")
+                },
+                Style::default().fg(palette.markdown_code_block),
+            ))
+        })
+        .collect()
+}
+
+fn is_file_mutation_tool(tool_name: &str) -> bool {
+    matches!(tool_name, "edit" | "write" | "apply_patch")
+}
+
+fn tool_diff_lines(tool_name: &str, state: &Value, palette: &Theme) -> Option<Vec<Line<'static>>> {
+    let input = tool_input_object(state.get("input")?)?;
+    let structured = state
+        .get("structured")
+        .or_else(|| state.get("metadata"))
+        .and_then(Value::as_object);
+
+    if let Some(files) = structured
+        .and_then(|value| value.get("files"))
+        .and_then(Value::as_array)
+    {
+        let mut lines = Vec::new();
+        for file in files {
+            let Some(file) = file.as_object() else {
+                continue;
+            };
+            let Some(patch) = file.get("patch").and_then(Value::as_str) else {
+                continue;
+            };
+            let path = file
+                .get("relativePath")
+                .or_else(|| file.get("filePath"))
+                .and_then(Value::as_str)
+                .unwrap_or("changed file");
+            lines.push(diff_title(path, palette));
+            lines.extend(styled_patch_lines(patch, palette));
+        }
+        if !lines.is_empty() {
+            return Some(lines);
+        }
+    }
+
+    if let Some(diff) = structured
+        .and_then(|value| value.get("diff"))
+        .and_then(Value::as_str)
+    {
+        let path = input
+            .get("filePath")
+            .and_then(Value::as_str)
+            .unwrap_or("changed file");
+        let mut lines = vec![diff_title(path, palette)];
+        lines.extend(styled_patch_lines(diff, palette));
+        return Some(lines);
+    }
+
+    match tool_name.to_ascii_lowercase().as_str() {
+        "edit" => {
+            let before = input.get("oldString").and_then(Value::as_str)?;
+            let after = input.get("newString").and_then(Value::as_str)?;
+            let path = input
+                .get("filePath")
+                .and_then(Value::as_str)
+                .unwrap_or("changed file");
+            let mut lines = vec![diff_title(path, palette)];
+            lines.extend(styled_replacement_lines(before, after, palette));
+            Some(lines)
+        }
+        "apply_patch" => {
+            let patch = input.get("patchText").and_then(Value::as_str)?;
+            let mut lines = vec![diff_title("patch", palette)];
+            lines.extend(styled_patch_lines(patch, palette));
+            Some(lines)
+        }
+        "write" => {
+            let content = input.get("content").and_then(Value::as_str)?;
+            let path = input
+                .get("filePath")
+                .and_then(Value::as_str)
+                .unwrap_or("written file");
+            let mut lines = vec![diff_title(path, palette)];
+            lines.extend(content.lines().map(|line| {
+                styled_tool_diff_line("+", line, palette.diff_added, palette.diff_added_bg)
+            }));
+            Some(lines)
+        }
+        _ => None,
+    }
+}
+
+fn tool_input_object(input: &Value) -> Option<serde_json::Map<String, Value>> {
+    match input {
+        Value::Object(input) => Some(input.clone()),
+        Value::String(input) => serde_json::from_str::<Value>(input)
+            .ok()?
+            .as_object()
+            .cloned(),
+        _ => None,
+    }
+}
+
+fn diff_title(path: &str, palette: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("    diff: {path}"),
+        Style::default()
+            .fg(palette.diff_hunk_header)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn styled_replacement_lines(before: &str, after: &str, palette: &Theme) -> Vec<Line<'static>> {
+    before
+        .lines()
+        .map(|line| styled_tool_diff_line("-", line, palette.diff_removed, palette.diff_removed_bg))
+        .chain(after.lines().map(|line| {
+            styled_tool_diff_line("+", line, palette.diff_added, palette.diff_added_bg)
+        }))
+        .collect()
+}
+
+fn styled_patch_lines(patch: &str, palette: &Theme) -> Vec<Line<'static>> {
+    patch
+        .lines()
+        .map(|line| {
+            if line.starts_with("@@")
+                || line.starts_with("*** ")
+                || line.starts_with("diff ")
+                || line.starts_with("--- ")
+                || line.starts_with("+++ ")
+            {
+                styled_tool_diff_line("", line, palette.diff_hunk_header, palette.diff_context_bg)
+            } else if let Some(value) = line.strip_prefix('+') {
+                styled_tool_diff_line("+", value, palette.diff_added, palette.diff_added_bg)
+            } else if let Some(value) = line.strip_prefix('-') {
+                styled_tool_diff_line("-", value, palette.diff_removed, palette.diff_removed_bg)
+            } else {
+                styled_tool_diff_line("", line, palette.diff_context, palette.diff_context_bg)
+            }
+        })
+        .collect()
+}
+
+fn styled_tool_diff_line(
+    prefix: &str,
+    value: &str,
+    foreground: ratatui::style::Color,
+    background: ratatui::style::Color,
+) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("    {prefix}{value}"),
+        Style::default().fg(foreground).bg(background),
+    ))
 }
 
 fn shell_lines(part: &Part, palette: &Theme) -> Vec<Line<'static>> {
@@ -722,5 +930,128 @@ mod tests {
         assert!(text.contains("[context compacted]  (manual)"));
         assert!(text.contains("Summary"));
         assert!(text.contains("recent: Recent context"));
+    }
+
+    fn tool_message(tool: &str, state: Value) -> MessageWithParts {
+        MessageWithParts {
+            info: MessageInfo {
+                id: "tool-message".to_owned(),
+                session_id: "session".to_owned(),
+                role: "assistant".to_owned(),
+                ..MessageInfo::default()
+            },
+            parts: vec![Part {
+                id: "tool-part".to_owned(),
+                message_id: "tool-message".to_owned(),
+                kind: "tool".to_owned(),
+                tool: Some(tool.to_owned()),
+                state: Some(state),
+                ..Part::default()
+            }],
+        }
+    }
+
+    fn rendered_text(messages: &[MessageWithParts], width: u16) -> String {
+        let view = TranscriptView::new(messages, width);
+        view.render_lines(messages, 0, view.total_lines(), width)
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn renders_complete_structured_tool_commands_without_length_truncation() {
+        let pattern = "needle".repeat(40);
+        let messages = vec![tool_message(
+            "grep",
+            serde_json::json!({
+                "status": "running",
+                "input": {
+                    "pattern": pattern,
+                    "path": "src",
+                    "include": "*.rs"
+                }
+            }),
+        )];
+
+        let text = rendered_text(&messages, 1000);
+        assert!(text.contains("command: grep"));
+        assert!(text.contains(&pattern));
+        assert!(text.contains("\"path\":\"src\""));
+        assert!(text.contains("\"include\":\"*.rs\""));
+    }
+
+    #[test]
+    fn renders_streamed_shell_input_as_the_complete_command() {
+        let messages = vec![tool_message(
+            "bash",
+            serde_json::json!({
+                "status": "pending",
+                "input": "{\"command\":\"rg --hidden needle src && cargo check\"}"
+            }),
+        )];
+
+        let text = rendered_text(&messages, 200);
+        assert!(text.contains("$ rg --hidden needle src && cargo check"));
+    }
+
+    #[test]
+    fn renders_edit_metadata_as_a_themed_inline_diff() {
+        let messages = vec![tool_message(
+            "edit",
+            serde_json::json!({
+                "status": "completed",
+                "input": { "filePath": "src/main.rs" },
+                "metadata": {
+                    "diff": "--- src/main.rs\n+++ src/main.rs\n@@ -1 +1 @@\n-old\n+new"
+                }
+            }),
+        )];
+        let view = TranscriptView::new(&messages, 200);
+        let lines = view.render_lines(&messages, 0, view.total_lines(), 200);
+        let removed = lines
+            .iter()
+            .find(|line| line.spans.iter().any(|span| span.content.contains("-old")));
+        let added = lines
+            .iter()
+            .find(|line| line.spans.iter().any(|span| span.content.contains("+new")));
+
+        assert!(rendered_text(&messages, 200).contains("diff: src/main.rs"));
+        assert_eq!(
+            removed
+                .and_then(|line| line.spans.first())
+                .map(|span| span.style.fg),
+            Some(Some(Theme::default().diff_removed))
+        );
+        assert_eq!(
+            added
+                .and_then(|line| line.spans.first())
+                .map(|span| span.style.fg),
+            Some(Some(Theme::default().diff_added))
+        );
+    }
+
+    #[test]
+    fn renders_pending_apply_patch_content_before_the_tool_finishes() {
+        let messages = vec![tool_message(
+            "apply_patch",
+            serde_json::json!({
+                "status": "running",
+                "input": {
+                    "patchText": "*** Begin Patch\n*** Update File: src/main.rs\n@@\n-old\n+new\n*** End Patch"
+                }
+            }),
+        )];
+
+        let text = rendered_text(&messages, 200);
+        assert!(text.contains("diff: patch"));
+        assert!(text.contains("-old"));
+        assert!(text.contains("+new"));
     }
 }

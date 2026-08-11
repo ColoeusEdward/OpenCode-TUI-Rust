@@ -1,9 +1,10 @@
 use crate::event::{ServerEvent, parse_sse_frame};
 use crate::model::{
-    AgentInfo, CommandInfo, FileDiff, LspStatus, McpStatus, MessageWithParts, PermissionRequest,
-    PromptRequest, ProviderCatalog, QuestionRequest, ReferenceInfo, Session, SessionArchiveTime,
-    SessionArchiveUpdate, SessionMoveDestination, SessionMoveRequest, SessionStatus, SessionUpdate,
-    Skill, TodoItem, VcsDiffMode, VcsFileDiff, VcsFileStatus, VcsInfo, WorkspaceFile,
+    AgentInfo, CommandInfo, FileDiff, LspStatus, McpStatus, MessageWithParts, ModelRef,
+    PermissionRequest, PromptRequest, ProviderCatalog, QuestionRequest, ReferenceInfo, Session,
+    SessionArchiveTime, SessionArchiveUpdate, SessionMoveDestination, SessionMoveRequest,
+    SessionStatus, SessionUpdate, Skill, TodoItem, VcsDiffMode, VcsFileDiff, VcsFileStatus,
+    VcsInfo, WorkspaceFile,
 };
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
@@ -277,6 +278,19 @@ impl ApiClient {
     pub async fn list_session_children(&self, session_id: &str) -> Result<Vec<Session>> {
         let path = format!("/session/{session_id}/children");
         let response = self.request(Method::GET, &path, true).send().await?;
+        decode_json(response).await
+    }
+
+    pub async fn summarize_session(&self, session_id: &str, model: &ModelRef) -> Result<bool> {
+        let path = format!("/session/{session_id}/summarize");
+        let response = self
+            .request(Method::POST, &path, true)
+            .json(&json!({
+                "providerID": model.provider_id,
+                "modelID": model.id,
+            }))
+            .send()
+            .await?;
         decode_json(response).await
     }
 
@@ -889,6 +903,51 @@ mod tests {
             .expect("fork should decode");
 
         assert_eq!(session.id, "ses_forked");
+        server.await.expect("fixture server should finish");
+    }
+
+    #[tokio::test]
+    async fn summarize_fixture_posts_the_active_model_and_decodes_acceptance() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fixture listener should bind");
+        let address = listener.local_addr().expect("fixture address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("fixture request");
+            let request = read_request(&mut socket).await;
+            let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+            assert!(request.contains("post /session/ses_1/summarize?"));
+            assert!(request.contains("\"providerid\":\"provider_1\""));
+            assert!(request.contains("\"modelid\":\"model_1\""));
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\ntrue",
+                )
+                .await
+                .expect("fixture response");
+            socket.shutdown().await.expect("fixture shutdown");
+        });
+
+        let client = fixture_client(ClientConfig {
+            base_url: format!("http://{address}"),
+            username: "opencode".to_owned(),
+            password: None,
+            directory: Some("E:/workspace/project".to_owned()),
+            workspace: Some("workspace-id".to_owned()),
+        });
+        let accepted = client
+            .summarize_session(
+                "ses_1",
+                &ModelRef {
+                    provider_id: "provider_1".to_owned(),
+                    id: "model_1".to_owned(),
+                    ..ModelRef::default()
+                },
+            )
+            .await
+            .expect("summarize response should decode");
+
+        assert!(accepted);
         server.await.expect("fixture server should finish");
     }
 

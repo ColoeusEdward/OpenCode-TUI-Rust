@@ -34,6 +34,8 @@ Completed:
   reaching the reducer.
 - The `session.next.compaction.started/delta/ended` lifecycle now has validated typed DTOs and is
   projected into a system transcript block with summary and recent-context metadata.
+- `/compact` and `/summarize` now invoke the model-backed session summarize endpoint and follow the
+  typed compaction lifecycle through working, streaming summary, completion, and failure states.
 - The remaining current `session.next` control family is now typed and reducer-backed: agent/model
   switches, moves, prompt/admission, context/synthetic messages, retry metadata, and revert staged/
   cleared/committed lifecycle events.
@@ -79,6 +81,9 @@ Completed:
   comments, and numeric literals through the local Markdown theme.
 - Reasoning and tool details can be collapsed or expanded with `Ctrl-Shift-B`; the collapsed part IDs
   are retained in session state and included in virtualized transcript line-count calculation.
+- Streaming tool blocks now preserve complete shell and structured invocations. Edit, write, and
+  apply-patch tools render themed inline diffs from live `structured` or persisted `metadata`, with
+  input-derived previews available before mutation metadata arrives.
 - Subtask prompt parts can be queued for non-primary agents, and the Composer draft exposes typed
   `noReply`, tool override, text/JSON-object output-format, and system-instruction options for the next
   prompt.
@@ -615,6 +620,8 @@ message anchors are implemented; advanced scroll behavior remains future work.
   lightweight syntax highlighting, inline code, aligned GFM tables, and tool
   input/structured/content/file/result/error output, plus context compaction summaries. Reasoning and
   tool detail blocks support ID-based collapse/expand state without changing the underlying transcript data.
+  Tool input is no longer length-truncated or replaced with an object placeholder, and mutation tools
+  render inline unified diffs during the working lifecycle and after durable transcript refreshes.
 - Add transcript auto-follow, manual scroll, jump-to-latest, and working indicators. **Completed:**
   `ScrollState` measures wrapped content through Ratatui's rendered-line info, preserves manual
   positions while streaming through message-ID anchors, resumes tail-following at the latest line for

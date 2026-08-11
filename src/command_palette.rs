@@ -179,6 +179,13 @@ pub fn all_commands() -> Vec<Command> {
             keybinding: Some("Ctrl-X"),
         },
         Command {
+            id: "compact_session",
+            name: "Compact Session",
+            description: "Summarize the current session to reduce its context",
+            category: CommandCategory::Session,
+            keybinding: Some("/compact"),
+        },
+        Command {
             id: "select_model",
             name: "Select Model",
             description: "Choose a provider/model for the next prompt",

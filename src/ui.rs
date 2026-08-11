@@ -6,7 +6,9 @@ use crate::dialog::{
 };
 use crate::markdown::{MarkdownRenderer, MarkdownTheme};
 use crate::mention::{MentionKind, mention_options};
-use crate::model::{FileDiff, MessageInfo, MessageWithParts, Part, PromptPart, Skill, VcsFileDiff};
+use crate::model::{
+    FileDiff, MessageInfo, MessageWithParts, Part, PromptPart, Session, Skill, VcsFileDiff,
+};
 use crate::notification_state::NotificationLevel;
 use crate::selection::SelectionPane;
 use crate::theme::Theme;
@@ -17,7 +19,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme;
@@ -91,6 +93,10 @@ fn draw_home(frame: &mut Frame<'_>, app: &App, theme: Theme) {
             Style::default().fg(theme.text).add_modifier(Modifier::BOLD),
         ),
         Span::styled("  Rust TUI", Style::default().fg(theme.accent)),
+        Span::styled(
+            format!("  [{}]", current_directory(app)),
+            Style::default().fg(theme.text_muted),
+        ),
         Span::styled(
             format!("  {}", app.connection_label()),
             Style::default().fg(connection_color(app, theme)),
@@ -172,17 +178,7 @@ fn draw_home(frame: &mut Frame<'_>, app: &App, theme: Theme) {
         ));
     }
     frame.render_stateful_widget(list, layout[1], &mut state);
-    draw_footer(
-        frame,
-        app,
-        layout[2],
-        if app.session.show_archived {
-            "Up/Down select  Enter open  A active  Ctrl-P commands  q quit"
-        } else {
-            "Up/Down select  Enter open  n new  a archived  F2/e rename  Delete/d remove  q quit"
-        },
-        theme,
-    );
+    draw_footer(frame, app, layout[2], "? shortcuts", theme);
 }
 
 fn draw_session(frame: &mut Frame<'_>, app: &mut App, theme: Theme) {
@@ -235,7 +231,7 @@ fn draw_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
             };
             let list = List::new(items)
                 .block(dialog_block("Commands", theme))
-                .highlight_style(selection_style(theme))
+                .highlight_style(purple_selection_style(theme))
                 .highlight_symbol("> ");
             let mut state = ListState::default();
             if !options.is_empty() {
@@ -244,8 +240,8 @@ fn draw_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
             frame.render_stateful_widget(list, area, &mut state);
         }
         OverlayState::Model { query, selected } => {
-            let options = model_options(&app.catalog.providers, query);
-            draw_catalog_dialog(
+            let options = model_options(&app.catalog.providers, &app.catalog.recent_models, query);
+            draw_catalog_dialog_with_selection_style(
                 frame,
                 "Select model",
                 query,
@@ -268,6 +264,7 @@ fn draw_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
                         (value, option.provider_name.clone())
                     })
                     .collect(),
+                purple_selection_style(theme),
             );
         }
         OverlayState::Skill { query, selected } => {
@@ -366,7 +363,7 @@ fn draw_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
         }
         OverlayState::CommandPalette { query, selected } => {
             let options = filter_commands(query);
-            draw_catalog_dialog(
+            draw_catalog_dialog_with_selection_style(
                 frame,
                 "Command palette",
                 query,
@@ -382,6 +379,7 @@ fn draw_overlay(frame: &mut Frame<'_>, app: &App, theme: Theme) {
                         )
                     })
                     .collect(),
+                purple_selection_style(theme),
             );
         }
         OverlayState::Theme { selected } => draw_theme_dialog(frame, *selected, theme),
@@ -1583,6 +1581,26 @@ fn draw_catalog_dialog(
     theme: Theme,
     entries: Vec<(String, String)>,
 ) {
+    draw_catalog_dialog_with_selection_style(
+        frame,
+        title,
+        query,
+        selected,
+        theme,
+        entries,
+        selection_style(theme),
+    );
+}
+
+fn draw_catalog_dialog_with_selection_style(
+    frame: &mut Frame<'_>,
+    title: &str,
+    query: &str,
+    selected: usize,
+    theme: Theme,
+    entries: Vec<(String, String)>,
+    selected_style: Style,
+) {
     let area = dialog_area(frame.area(), 78, dialog_height(entries.len(), 1));
     let has_entries = !entries.is_empty();
     frame.render_widget(Clear, area);
@@ -1629,7 +1647,7 @@ fn draw_catalog_dialog(
     };
     let count = items.len();
     let list = List::new(items)
-        .highlight_style(selection_style(theme))
+        .highlight_style(selected_style)
         .highlight_symbol("> ");
     let mut state = ListState::default();
     if has_entries {
@@ -1650,6 +1668,13 @@ fn selection_style(theme: Theme) -> Style {
     Style::default()
         .bg(theme.background_element)
         .fg(theme.selected_list_item_text)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn purple_selection_style(theme: Theme) -> Style {
+    Style::default()
+        .bg(theme.background_element)
+        .fg(theme.secondary)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -1722,6 +1747,10 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
             format!("  {}", app.status_label()),
             Style::default().fg(status_color(app, theme)),
         ),
+        Span::styled(
+            format!("  [{}]", current_directory(app)),
+            Style::default().fg(theme.text_muted),
+        ),
         Span::styled(share_status, Style::default().fg(theme.success)),
         Span::styled(fork_status, Style::default().fg(theme.text_muted)),
         Span::styled(archive_status, Style::default().fg(theme.warning)),
@@ -1745,6 +1774,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
     // Use virtualized rendering for better performance with large transcripts
     let transcript_area = layout[1];
     // Paragraph with Block handles border internally, so we only need to account for the inner area
+    let transcript_width = transcript_area.width.saturating_sub(2).max(1);
     let inner_height = transcript_area.height.saturating_sub(2) as usize;
     // The inner_height already represents the exact visible lines; no adjustment needed
     let viewport_height = inner_height;
@@ -1765,11 +1795,11 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
             app.transcript.scroll.anchor()
         };
         let view = if app.transcript.collapsed_parts.is_empty() {
-            TranscriptView::with_theme(&messages, transcript_area.width, &theme)
+            TranscriptView::with_theme(&messages, transcript_width, &theme)
         } else {
             TranscriptView::with_collapsed_theme(
                 &messages,
-                transcript_area.width,
+                transcript_width,
                 &app.transcript.collapsed_parts,
                 &theme,
             )
@@ -1791,7 +1821,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
         // Render only visible lines
         let scroll_offset = app.transcript.scroll.offset() as usize;
         let end_offset = (scroll_offset + viewport_height).min(total_lines);
-        let lines = view.render_lines(&messages, scroll_offset, end_offset, transcript_area.width);
+        let lines = view.render_lines(&messages, scroll_offset, end_offset, transcript_width);
         app.transcript
             .scroll
             .set_anchor(view.anchor_at_line(&messages, scroll_offset));
@@ -1832,13 +1862,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
     app.selection
         .record_pane(SelectionPane::Prompt, prompt_inner, prompt_rows);
 
-    draw_footer(
-        frame,
-        app,
-        layout[5],
-        "Enter send  Ctrl-Shift-B collapse  Ctrl-Shift-U attach  Ctrl-Shift-T subtask  Ctrl-Shift-O prompt panel",
-        theme,
-    );
+    draw_footer(frame, app, layout[5], "? shortcuts", theme);
 }
 
 fn draw_attachments(frame: &mut Frame<'_>, app: &App, area: Rect, theme: Theme) {
@@ -2697,6 +2721,14 @@ fn lsp_root_label(server: &crate::model::LspStatus) -> String {
 }
 
 fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect, keys: &str, theme: Theme) {
+    let mut line = Line::default();
+    if let Some(response) = response_footer(app) {
+        line.spans.push(Span::styled(
+            response,
+            Style::default().fg(theme.text_muted),
+        ));
+        line.spans.push(Span::raw("  "));
+    }
     let message = app.notifications.active().unwrap_or(keys);
     let style = if app.notifications.active().is_some() {
         Style::default().fg(notification_level_color(
@@ -2706,7 +2738,34 @@ fn draw_footer(frame: &mut Frame<'_>, app: &App, area: Rect, keys: &str, theme: 
     } else {
         Style::default().fg(theme.text_muted)
     };
-    frame.render_widget(Paragraph::new(message.to_owned()).style(style), area);
+    line.spans.push(Span::styled(message.to_owned(), style));
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+fn response_footer(app: &App) -> Option<String> {
+    let response = &app.runtime.response;
+    if !response.has_data() {
+        return None;
+    }
+    let state = if app.runtime.working {
+        "responding"
+    } else {
+        "last"
+    };
+    Some(format!(
+        "{state} {}",
+        format_response_duration(response.elapsed())
+    ))
+}
+
+fn format_response_duration(duration: Duration) -> String {
+    let millis = duration.as_millis();
+    let seconds = millis / 1_000;
+    if seconds < 60 {
+        format!("{seconds}.{:01}s", (millis % 1_000) / 100)
+    } else {
+        format!("{}:{:02}", seconds / 60, seconds % 60)
+    }
 }
 
 fn notification_level_color(level: NotificationLevel, theme: Theme) -> Color {
@@ -2917,9 +2976,24 @@ fn status_color(app: &App, theme: Theme) -> Color {
     }
 }
 
+fn current_directory(app: &App) -> String {
+    app.session
+        .current_session
+        .as_ref()
+        .and_then(Session::directory)
+        .map(str::to_owned)
+        .or_else(|| app.client.directory().map(str::to_owned))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|directory| directory.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::draw;
+    use super::{draw, purple_selection_style};
     use crate::api::{ApiClient, ClientConfig};
     use crate::app::{App, Screen};
     use crate::dialog::OverlayState;
@@ -2934,6 +3008,15 @@ mod tests {
     use ratatui::backend::TestBackend;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn purple_selection_uses_the_theme_secondary_color() {
+        let theme = crate::theme::Theme::default();
+        let style = purple_selection_style(theme);
+
+        assert_eq!(style.fg, Some(theme.secondary));
+        assert_eq!(style.bg, Some(theme.background_element));
+    }
 
     fn app() -> App {
         let client = ApiClient::new(ClientConfig {
@@ -3008,6 +3091,25 @@ mod tests {
     }
 
     #[test]
+    fn renders_directory_and_single_help_shortcut_in_the_header_and_footer() {
+        let client = ApiClient::new(ClientConfig {
+            base_url: "http://127.0.0.1:4096".to_owned(),
+            username: "opencode".to_owned(),
+            password: None,
+            directory: Some("E:/workspace".to_owned()),
+            workspace: None,
+        })
+        .expect("test client should build");
+        let mut app = App::new(Arc::new(client));
+
+        let output = rendered(&mut app);
+
+        assert!(output.contains("[E:/workspace]"));
+        assert!(output.contains("? shortcuts"));
+        assert!(!output.contains("Enter open"));
+    }
+
+    #[test]
     fn renders_home_screen_at_narrow_terminal_sizes() {
         let mut app = app();
         app.session.sessions.push(Session {
@@ -3078,6 +3180,41 @@ mod tests {
     }
 
     #[test]
+    fn renders_response_duration_without_sent_or_received_counts() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.session.current_session = Some(Session {
+            id: "ses_metrics".to_owned(),
+            title: "Response metrics".to_owned(),
+            ..Session::default()
+        });
+        app.runtime.begin_response("hello world");
+        app.runtime.set_response_message("msg_metrics");
+        app.runtime.add_response_output("answer");
+
+        let output = rendered_at(&mut app, 120, 24);
+
+        assert!(output.contains("responding"));
+        assert!(!output.contains("sent "));
+        assert!(!output.contains("recv "));
+
+        app.runtime.finish_response_tokens(
+            "msg_metrics",
+            TokenUsage {
+                input: 120,
+                output: 45,
+                ..TokenUsage::default()
+            },
+        );
+        app.runtime.set_working(false);
+        let output = rendered_at(&mut app, 120, 24);
+
+        assert!(output.contains("last"));
+        assert!(!output.contains("sent "));
+        assert!(!output.contains("recv "));
+    }
+
+    #[test]
     fn renders_cjk_and_emoji_in_a_narrow_session() {
         let mut app = app();
         app.session.screen = Screen::Session;
@@ -3114,6 +3251,42 @@ mod tests {
         assert!(compact.contains("中文会话"), "rendered output: {output:?}");
         assert!(compact.contains("你好"), "rendered output: {output:?}");
         assert!(compact.contains("检查状态"), "rendered output: {output:?}");
+    }
+
+    #[test]
+    fn transcript_keeps_text_at_the_inner_right_edge_visible() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.session.current_session = Some(Session {
+            id: "ses_transcript_edge".to_owned(),
+            title: "Transcript edge".to_owned(),
+            ..Session::default()
+        });
+        let text = "123456789012345678901234567";
+        app.transcript.replace(vec![MessageWithParts {
+            info: MessageInfo {
+                id: "msg_transcript_edge".to_owned(),
+                session_id: "ses_transcript_edge".to_owned(),
+                role: "assistant".to_owned(),
+                time: MessageTime::default(),
+                ..MessageInfo::default()
+            },
+            parts: vec![Part {
+                id: "part_transcript_edge".to_owned(),
+                session_id: "ses_transcript_edge".to_owned(),
+                message_id: "msg_transcript_edge".to_owned(),
+                kind: "text".to_owned(),
+                text: Some(text.to_owned()),
+                ..Part::default()
+            }],
+        }]);
+
+        let output = rendered_at(&mut app, 40, 18);
+
+        assert!(
+            output.contains(text),
+            "the complete line should be visible at the transcript inner edge: {output:?}"
+        );
     }
 
     #[test]

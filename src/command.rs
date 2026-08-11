@@ -6,6 +6,7 @@ pub enum SlashCommand {
     Skill,
     Agent,
     Variant,
+    Compact,
     Timeline,
     Fork,
     Share,
@@ -64,7 +65,7 @@ impl CommandOption {
     }
 }
 
-const COMMANDS: [SlashCommandInfo; 8] = [
+const COMMANDS: [SlashCommandInfo; 9] = [
     SlashCommandInfo {
         command: SlashCommand::Model,
         name: "model",
@@ -88,6 +89,12 @@ const COMMANDS: [SlashCommandInfo; 8] = [
         name: "variant",
         aliases: &["variants", "va"],
         description: "Select the variant for the next prompt",
+    },
+    SlashCommandInfo {
+        command: SlashCommand::Compact,
+        name: "compact",
+        aliases: &["summarize"],
+        description: "Summarize and compact the current session context",
     },
     SlashCommandInfo {
         command: SlashCommand::Timeline,
@@ -193,6 +200,10 @@ mod tests {
         assert_eq!(matching_commands("SKI")[0].command, SlashCommand::Skill);
         assert_eq!(matching_commands("agents")[0].command, SlashCommand::Agent);
         assert_eq!(matching_commands("va")[0].command, SlashCommand::Variant);
+        assert_eq!(
+            matching_commands("summarize")[0].command,
+            SlashCommand::Compact
+        );
         assert_eq!(
             matching_commands("timeline")[0].command,
             SlashCommand::Timeline

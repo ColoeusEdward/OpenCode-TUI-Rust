@@ -48,12 +48,18 @@ are usable, while full OpenCode TUI parity is still under development.
 - Composer-backed multiline prompt editing with grapheme-safe horizontal cursor movement, selection,
   deletion, word-wise deletion, undo/redo, paste normalization, visual wrapping, and editor-owned
   cursor rendering.
+- Prompts submitted while the active session is working are captured as complete request snapshots and
+  held in a client-side FIFO queue. Each queued prompt is sent only after the server reports the previous
+  prompt idle, preserving its text, attachments, model, agent, and prompt options.
 - The prompt cursor is drawn by the application and blinks on an integrated phase: a calm 600 ms
   period while idle, and a fast period that drifts between 90 ms and 210 ms while the session is
   working, so the prompt itself shows that a response is in flight. The cursor is drawn on an empty
   prompt too, ahead of the placeholder text, and restarts visible on input.
 - Live text, reasoning, tool, shell, context-compaction, prompt, context, synthetic, and agent/model
   control event projections through the indexed transcript store.
+- Streaming tool blocks show the complete invocation instead of hiding object inputs or truncating long
+  commands. File mutation tools render themed inline diffs from live `structured` metadata and persisted
+  `metadata`; pending edit/apply-patch/write inputs provide an immediate diff-style preview.
 - Transcript auto-follow during streaming, bounded manual scrolling, and top/latest jumps for
   wrapped Markdown content.
 - Mouse capture with independent wheel scrolling for the transcript pane and runtime sidebar. Capture is
@@ -65,7 +71,8 @@ are usable, while full OpenCode TUI parity is still under development.
 - Action-required panel for permission and question requests.
 - Permission replies and question answers sent through background API effects.
 - Slash command autocomplete at the prompt start, with searchable `/model`, `/skill`, `/agent`, and
-  `/variant` dialogs plus plural aliases `/models`, `/skills`, `/agents`, and `/variants`.
+  `/variant` dialogs plus plural aliases `/models`, `/skills`, `/agents`, and `/variants`. `/compact`
+  (alias `/summarize`) requests model-backed context compaction for the active session.
 - Model, agent, and variant selections persist as next-prompt overrides; skill selection inserts
   `/<skill> ` into the Composer for arguments or immediate submission.
 - **Command palette (Ctrl-P) with searchable commands grouped by category, color-coded labels, and
@@ -181,6 +188,8 @@ Implemented:
   event payloads.
 - Validated typed conversion for live step, text, reasoning, tool, shell, and compaction lifecycle
   events plus the session control/retry/revert lifecycle, including malformed-payload isolation.
+- Tool rendering preserves complete shell and structured invocations, and displays edit, write, and
+  apply-patch changes as inline themed diffs during streaming and after transcript refresh.
 - Local Markdown rendering for headings, lists, quotes, fenced code, inline code, and rich tool
   input, structured output, content, files, results, errors, and aligned GFM tables; fenced code
   receives lightweight language-aware syntax highlighting.
@@ -420,6 +429,7 @@ Session:
 - `Ctrl-A`: select all prompt text
 - `Ctrl-U` / `Ctrl-R`: undo / redo
 - `Ctrl-P`: open command palette
+- `?`: open the keyboard shortcuts popup
 - `Ctrl-Backspace` (also `Alt-Backspace`, or `Ctrl-H` on terminals that send it): delete the word
   before the cursor
 - `Ctrl-Delete` / `Alt-Delete` / `Alt-D`: delete the word after the cursor
@@ -479,10 +489,13 @@ When the prompt contains `@`:
 
 When the prompt starts with `/`:
 
-- Type `/`, `/model`, `/skill`, `/agent`, `/variant`, `/timeline`, `/fork`, `/share`, or `/unshare` to open slash command suggestions.
+- Type `/`, `/model`, `/skill`, `/agent`, `/variant`, `/compact`, `/timeline`, `/fork`, `/share`, or `/unshare` to open slash command suggestions.
 - `Up` / `Down`: move through suggestions.
 - `Enter` or `Tab`: open the selected model or skill dialog.
 - `Esc`: close the suggestions and clear the command draft.
+
+`/compact` uses the active session model and also accepts `/summarize`. It calls
+`POST /session/:id/summarize`; select a model first when the session has no model metadata.
 
 Model dialog:
 

@@ -16,6 +16,7 @@ pub struct CatalogState {
     pub server_workspace_files: Vec<WorkspaceFile>,
     pub server_file_query: Option<String>,
     pub selected_model: Option<ModelRef>,
+    pub recent_models: Vec<ModelRef>,
     pub selected_agent: Option<String>,
 }
 
@@ -76,6 +77,17 @@ impl CatalogState {
     }
 
     pub fn select_model(&mut self, model: ModelRef) {
+        self.recent_models
+            .retain(|recent| recent.provider_id != model.provider_id || recent.id != model.id);
+        self.recent_models.insert(
+            0,
+            ModelRef {
+                id: model.id.clone(),
+                provider_id: model.provider_id.clone(),
+                variant: None,
+            },
+        );
+        self.recent_models.truncate(10);
         self.selected_model = Some(model);
     }
 
@@ -114,6 +126,39 @@ mod tests {
         assert_eq!(
             state.selected_model.as_ref().map(|model| model.id.as_str()),
             Some("model_1")
+        );
+    }
+
+    #[test]
+    fn selecting_models_keeps_the_ten_most_recent_without_duplicates() {
+        let mut state = CatalogState::default();
+        for index in 0..12 {
+            state.select_model(ModelRef {
+                id: format!("model_{index}"),
+                provider_id: "provider".to_owned(),
+                ..ModelRef::default()
+            });
+        }
+        state.select_model(ModelRef {
+            id: "model_5".to_owned(),
+            provider_id: "provider".to_owned(),
+            variant: Some("high".to_owned()),
+        });
+
+        assert_eq!(state.recent_models.len(), 10);
+        assert_eq!(state.recent_models[0].id, "model_5");
+        assert!(state.recent_models[0].variant.is_none());
+        assert_eq!(
+            state
+                .recent_models
+                .iter()
+                .filter(|model| model.id == "model_5")
+                .count(),
+            1
+        );
+        assert_eq!(
+            state.selected_model.as_ref().unwrap().variant.as_deref(),
+            Some("high")
         );
     }
 }

@@ -34,7 +34,7 @@ use anyhow::{Context, Result};
 use api::{ApiClient, ClientConfig};
 use app::App;
 use clap::Parser;
-use crossterm::event::EventStream;
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, EventStream};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use futures_util::StreamExt;
@@ -300,12 +300,12 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     let mut stdout = io::stdout();
     // Mouse reporting must be enabled through the platform's own channel; see
     // `mouse` for why Windows cannot use the ANSI tracking sequences here.
-    if let Err(error) =
-        execute!(stdout, EnterAlternateScreen).and_then(|()| mouse::enable(&mut stdout))
+    if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)
+        .and_then(|()| mouse::enable(&mut stdout))
     {
         mouse::disable_ignoring_errors();
         terminal::disable_raw_mode().ok();
-        execute!(io::stdout(), LeaveAlternateScreen).ok();
+        execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen).ok();
         return Err(error).context("failed to enter alternate screen");
     }
     match Terminal::new(CrosstermBackend::new(stdout)) {
@@ -313,7 +313,7 @@ fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
         Err(error) => {
             mouse::disable_ignoring_errors();
             terminal::disable_raw_mode().ok();
-            execute!(io::stdout(), LeaveAlternateScreen).ok();
+            execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen).ok();
             Err(error).context("failed to create terminal")
         }
     }
@@ -324,8 +324,12 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result
     // restored in the reverse order it was changed.
     mouse::disable(terminal.backend_mut()).ok();
     terminal::disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)
-        .context("failed to leave alternate screen")?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )
+    .context("failed to leave alternate screen")?;
     terminal
         .show_cursor()
         .context("failed to show terminal cursor")
@@ -356,7 +360,7 @@ impl Drop for TerminalGuard {
         }
         mouse::disable_ignoring_errors();
         terminal::disable_raw_mode().ok();
-        execute!(io::stdout(), LeaveAlternateScreen).ok();
+        execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen).ok();
         execute!(io::stdout(), crossterm::cursor::Show).ok();
     }
 }
