@@ -3516,6 +3516,42 @@ mod tests {
     }
 
     #[test]
+    fn new_session_sidebar_uses_the_latest_selected_provider_and_model() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.session.current_session = Some(Session {
+            id: "ses_new".to_owned(),
+            title: "New session".to_owned(),
+            ..Session::default()
+        });
+        app.catalog.selected_model = Some(ModelRef {
+            id: "latest_model".to_owned(),
+            provider_id: "latest_provider".to_owned(),
+            ..ModelRef::default()
+        });
+        app.catalog.providers.push(ProviderInfo {
+            id: "latest_provider".to_owned(),
+            name: "Latest Provider".to_owned(),
+            models: HashMap::from([(
+                "latest_model".to_owned(),
+                ModelInfo {
+                    id: "latest_model".to_owned(),
+                    provider_id: "latest_provider".to_owned(),
+                    name: "Latest Model".to_owned(),
+                    ..ModelInfo::default()
+                },
+            )]),
+        });
+
+        let output = rendered_at(&mut app, 120, 30);
+
+        assert!(output.contains("Latest Provider"));
+        assert!(output.contains("Latest Model"));
+        assert!(!output.contains("provider: unknown"));
+        assert!(!output.contains("model: unknown"));
+    }
+
+    #[test]
     fn renders_permission_action_panel() {
         let mut app = app();
         app.session.screen = Screen::Session;

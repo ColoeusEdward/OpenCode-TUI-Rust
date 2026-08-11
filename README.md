@@ -2,6 +2,8 @@
 
 Native Rust TUI client for an `opencode serve` process.
 
+![Screenshot](https://i0.wp.com/tva1.sinaimg.cn/large/9448bbf8gy1ifzy6b6lqcj211s0k643w.jpg)
+
 This project is a standalone rewrite of the core client boundary in
 `E:/Code/pj/opencode/packages/tui`. It keeps the server as the source of truth
 and uses the documented HTTP API plus SSE event stream:
@@ -115,7 +117,7 @@ are usable, while full OpenCode TUI parity is still under development.
 - Sessions can be moved from the command palette with an editable destination directory and an optional local
   changes transfer flag; the move is confirmed before the background request is sent.
 - The command palette opens a read-only session diff viewer with changed-file selection, additions/deletions,
-   themed before/after lines, independent content scrolling, and refresh from the active session.
+  themed before/after lines, independent content scrolling, and refresh from the active session.
 - The command palette opens a VCS diff viewer with working-tree/default-branch source switching, changed-file
   selection, unified patch rendering, independent content scrolling, and refresh.
 - Local file attachments can be entered by path, read in a background worker, and sent as binary-safe

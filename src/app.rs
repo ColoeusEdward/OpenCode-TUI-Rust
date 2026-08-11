@@ -1452,21 +1452,36 @@ impl App {
                 }
                 Vec::new()
             }
-            ApiResult::CreatedSession(result) => match result {
-                Ok(session) => {
-                    let session_id = session.id.clone();
-                    self.upsert_session(session);
-                    self.select_session(&session_id);
-                    self.session.opening_session = Some(session_id.clone());
-                    self.notifications.set("Session created".to_owned());
-                    vec![Effect::Api(ApiRequest::OpenSession(session_id))]
+            ApiResult::CreatedSession { session, providers } => {
+                let provider_error = match providers {
+                    Ok(catalog) => {
+                        self.catalog.replace_providers(catalog);
+                        None
+                    }
+                    Err(error) => Some(error),
+                };
+                match session {
+                    Ok(session) => {
+                        let session_id = session.id.clone();
+                        self.upsert_session(session);
+                        self.select_latest_model_for_new_session();
+                        self.select_session(&session_id);
+                        self.session.opening_session = Some(session_id.clone());
+                        self.notifications.set(match provider_error {
+                            Some(error) => {
+                                format!("Session created; provider catalog unavailable: {error}")
+                            }
+                            None => "Session created".to_owned(),
+                        });
+                        vec![Effect::Api(ApiRequest::OpenSession(session_id))]
+                    }
+                    Err(error) => {
+                        self.notifications
+                            .set(format!("Create session failed: {error}"));
+                        Vec::new()
+                    }
                 }
-                Err(error) => {
-                    self.notifications
-                        .set(format!("Create session failed: {error}"));
-                    Vec::new()
-                }
-            },
+            }
             ApiResult::OpenedSession(result) => {
                 match result {
                     Ok(snapshot) => return self.apply_opened_session(snapshot),
@@ -4508,6 +4523,36 @@ impl App {
         self.runtime.mark_connected();
     }
 
+    fn select_latest_model_for_new_session(&mut self) {
+        let catalog_loaded = !self.catalog.providers.is_empty();
+        let available = |model: &ModelRef| !catalog_loaded || self.catalog.has_model(model);
+        let selected = self
+            .catalog
+            .selected_model
+            .clone()
+            .filter(|model| available(model));
+        let recent = self
+            .catalog
+            .recent_models
+            .iter()
+            .find(|model| available(model))
+            .cloned();
+        let latest_session = self
+            .session
+            .sessions
+            .iter()
+            .filter_map(|session| {
+                session
+                    .model
+                    .as_ref()
+                    .filter(|model| available(model))
+                    .map(|model| (session.time.updated, model.clone()))
+            })
+            .max_by_key(|(updated, _)| *updated)
+            .map(|(_, model)| model);
+        self.catalog.selected_model = selected.or(latest_session).or(recent);
+    }
+
     fn set_permissions(&mut self, permissions: Vec<PermissionRequest>) {
         self.pending.set_permissions(permissions);
     }
@@ -4880,8 +4925,9 @@ mod tests {
     use crate::model::{
         AgentInfo, CommandInfo, FileDiff, McpServer, MessageInfo, MessageTime, MessageWithParts,
         ModelInfo, ModelRef, Part, PermissionRequest, PromptFileSource, PromptOutputFormat,
-        PromptPart, ProviderInfo, Session, SessionShare, SessionStatus, SessionTime, Skill,
-        TodoItem, VcsDiffMode, VcsFileDiff, VcsFileStatus, VcsInfo, WorkspaceFile,
+        PromptPart, ProviderCatalog, ProviderInfo, Session, SessionShare, SessionStatus,
+        SessionTime, Skill, TodoItem, VcsDiffMode, VcsFileDiff, VcsFileStatus, VcsInfo,
+        WorkspaceFile,
     };
     use crate::runtime::{ApiRequest, ApiResult, AppMsg, Effect, PermissionReply, SessionSnapshot};
     use crate::theme::ThemeMode;
@@ -5748,6 +5794,102 @@ mod tests {
                     })
                 && request.agent.is_none()
         ));
+    }
+
+    #[test]
+    fn creating_a_session_refreshes_providers_and_reuses_the_latest_available_model() {
+        let mut app = app();
+        app.catalog.providers.push(ProviderInfo {
+            id: "stale_provider".to_owned(),
+            models: HashMap::from([(
+                "stale_model".to_owned(),
+                ModelInfo {
+                    id: "stale_model".to_owned(),
+                    provider_id: "stale_provider".to_owned(),
+                    ..ModelInfo::default()
+                },
+            )]),
+            ..ProviderInfo::default()
+        });
+        app.session.sessions = vec![
+            Session {
+                id: "ses_older".to_owned(),
+                model: Some(ModelRef {
+                    id: "older_model".to_owned(),
+                    provider_id: "fresh_provider".to_owned(),
+                    ..ModelRef::default()
+                }),
+                time: SessionTime {
+                    updated: 10,
+                    ..SessionTime::default()
+                },
+                ..Session::default()
+            },
+            Session {
+                id: "ses_latest".to_owned(),
+                model: Some(ModelRef {
+                    id: "latest_model".to_owned(),
+                    provider_id: "fresh_provider".to_owned(),
+                    variant: Some("high".to_owned()),
+                }),
+                time: SessionTime {
+                    updated: 20,
+                    ..SessionTime::default()
+                },
+                ..Session::default()
+            },
+        ];
+        let providers = ProviderCatalog {
+            providers: vec![ProviderInfo {
+                id: "fresh_provider".to_owned(),
+                name: "Fresh Provider".to_owned(),
+                models: HashMap::from([
+                    (
+                        "older_model".to_owned(),
+                        ModelInfo {
+                            id: "older_model".to_owned(),
+                            provider_id: "fresh_provider".to_owned(),
+                            ..ModelInfo::default()
+                        },
+                    ),
+                    (
+                        "latest_model".to_owned(),
+                        ModelInfo {
+                            id: "latest_model".to_owned(),
+                            provider_id: "fresh_provider".to_owned(),
+                            ..ModelInfo::default()
+                        },
+                    ),
+                ]),
+            }],
+            default: HashMap::from([("fresh_provider".to_owned(), "latest_model".to_owned())]),
+        };
+
+        let effects = app.update(AppMsg::Api(Box::new(ApiResult::CreatedSession {
+            session: Ok(Session {
+                id: "ses_new".to_owned(),
+                time: SessionTime {
+                    updated: 30,
+                    ..SessionTime::default()
+                },
+                ..Session::default()
+            }),
+            providers: Ok(providers),
+        })));
+
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiRequest::OpenSession(session_id))] if session_id == "ses_new"
+        ));
+        assert_eq!(app.catalog.providers[0].id, "fresh_provider");
+        assert_eq!(
+            app.catalog.selected_model.as_ref().map(|model| (
+                model.provider_id.as_str(),
+                model.id.as_str(),
+                model.variant.as_deref(),
+            )),
+            Some(("fresh_provider", "latest_model", Some("high")))
+        );
     }
 
     #[test]

@@ -191,7 +191,10 @@ pub enum ApiResult {
         session_id: String,
         result: Result<PromptPart, String>,
     },
-    CreatedSession(Result<Session, String>),
+    CreatedSession {
+        session: Result<Session, String>,
+        providers: Result<ProviderCatalog, String>,
+    },
     OpenedSession(Result<SessionSnapshot, String>),
     RefreshedSession(Result<SessionSnapshot, String>),
     RenamedSession(Result<Session, String>),
@@ -359,12 +362,14 @@ pub async fn execute_request(client: Arc<ApiClient>, request: ApiRequest) -> Api
                 .and_then(|result| result);
             ApiResult::Attachment { session_id, result }
         }
-        ApiRequest::CreateSession => ApiResult::CreatedSession(
-            client
-                .create_session(None)
-                .await
-                .map_err(|error| error.to_string()),
-        ),
+        ApiRequest::CreateSession => {
+            let (session, providers) =
+                tokio::join!(client.create_session(None), client.list_providers());
+            ApiResult::CreatedSession {
+                session: session.map_err(|error| error.to_string()),
+                providers: providers.map_err(|error| error.to_string()),
+            }
+        }
         ApiRequest::OpenSession(session_id) => {
             ApiResult::OpenedSession(load_session(client, session_id).await)
         }

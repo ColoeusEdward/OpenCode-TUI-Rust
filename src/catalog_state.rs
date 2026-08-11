@@ -79,6 +79,18 @@ impl CatalogState {
         self.provider_defaults = catalog.default;
     }
 
+    pub fn has_model(&self, model: &ModelRef) -> bool {
+        self.providers
+            .iter()
+            .find(|provider| provider.id == model.provider_id)
+            .is_some_and(|provider| {
+                provider.models.iter().any(|(key, info)| {
+                    (key == &model.id || info.id == model.id)
+                        && (info.provider_id.is_empty() || info.provider_id == model.provider_id)
+                })
+            })
+    }
+
     pub fn replace_skills(&mut self, skills: Vec<Skill>) {
         self.skills = skills;
     }
