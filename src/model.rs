@@ -969,10 +969,6 @@ pub struct Skill {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub location: String,
-    #[serde(default)]
-    pub content: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

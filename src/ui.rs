@@ -7,7 +7,7 @@ use crate::dialog::{
 use crate::markdown::{MarkdownRenderer, MarkdownTheme};
 use crate::mention::{MentionKind, mention_options};
 use crate::model::{
-    FileDiff, MessageInfo, MessageWithParts, Part, PromptPart, Session, Skill, VcsFileDiff,
+    FileDiff, MessageInfo, MessageWithParts, Part, PromptPart, Session, VcsFileDiff,
 };
 use crate::notification_state::NotificationLevel;
 use crate::selection::SelectionPane;
@@ -2404,46 +2404,6 @@ fn sidebar_lines(app: &App, theme: Theme) -> Vec<Line<'static>> {
         }
     }
 
-    lines.push(section_line(
-        theme,
-        &format!("v Skills ({})", app.catalog.skills.len()),
-    ));
-    if app.catalog.skills.is_empty() {
-        lines.push(detail_line(
-            theme,
-            "status",
-            "none loaded",
-            theme.text_muted,
-        ));
-    } else {
-        for skill in app.catalog.skills.iter().take(6) {
-            let estimate = estimate_skill_tokens(&skill.content);
-            let source = skill_source(skill);
-            let value = if estimate > 0 {
-                format!(
-                    "{}  {}  ~{}",
-                    fallback_text(&skill.name, "unnamed"),
-                    source,
-                    compact_tokens(estimate)
-                )
-            } else {
-                format!("{}  {}", fallback_text(&skill.name, "unnamed"), source)
-            };
-            lines.push(Line::from(Span::styled(
-                format!("  * {value}"),
-                Style::default().fg(theme.text),
-            )));
-        }
-        if app.catalog.skills.len() > 6 {
-            lines.push(detail_line(
-                theme,
-                "more",
-                format!("{} skills", app.catalog.skills.len() - 6),
-                theme.text_muted,
-            ));
-        }
-    }
-
     lines.push(section_line(theme, "v MCP"));
     if app.integrations.mcp.is_empty() {
         lines.push(detail_line(
@@ -2649,24 +2609,6 @@ fn format_count(value: u64) -> String {
 
 fn format_money(value: f64) -> String {
     format!("${value:.4}")
-}
-
-fn estimate_skill_tokens(content: &str) -> u64 {
-    content.chars().count().div_ceil(4) as u64
-}
-
-fn skill_source(skill: &Skill) -> &str {
-    if !skill.location.is_empty() {
-        skill
-            .location
-            .rsplit(['\\', '/'])
-            .next()
-            .unwrap_or(&skill.location)
-    } else if !skill.description.is_empty() {
-        "described"
-    } else {
-        "builtin"
-    }
 }
 
 fn fallback_text<'a>(value: &'a str, fallback: &'a str) -> &'a str {
@@ -3492,8 +3434,6 @@ mod tests {
         });
         app.catalog.skills.push(Skill {
             name: "demo-skill".to_owned(),
-            location: "C:\\skills\\demo-skill\\SKILL.md".to_owned(),
-            content: "A small test skill.".to_owned(),
             ..Skill::default()
         });
         app.integrations.mcp.push(McpServer {
@@ -3564,8 +3504,8 @@ mod tests {
         assert!(output.contains("Review the current diff"));
         assert!(output.contains("Modified files (1)"));
         assert!(output.contains("feature/runtime"));
-        assert!(output.contains("Skills (1)"));
-        assert!(output.contains("demo-skill"));
+        assert!(!output.contains("Skills ("));
+        assert!(!output.contains("demo-skill"));
         assert!(output.contains("MCP"));
         assert!(output.contains("chrome-devtools"));
         assert!(output.contains("LSPs are disabled"));
@@ -3629,7 +3569,6 @@ mod tests {
         app.catalog.skills.push(Skill {
             name: "review".to_owned(),
             description: "Review the current change".to_owned(),
-            ..Skill::default()
         });
         app.catalog.agents.push(AgentInfo {
             name: "build".to_owned(),

@@ -5761,7 +5761,6 @@ mod tests {
         app.catalog.skills.push(Skill {
             name: "review".to_owned(),
             description: "Review the current change".to_owned(),
-            ..Skill::default()
         });
 
         for character in "/skill".chars() {

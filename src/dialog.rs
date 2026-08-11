@@ -464,12 +464,10 @@ mod tests {
             Skill {
                 name: "review".to_owned(),
                 description: "Review   the   change".to_owned(),
-                ..Skill::default()
             },
             Skill {
                 name: "deploy".to_owned(),
                 description: "Ship it".to_owned(),
-                ..Skill::default()
             },
         ];
 
