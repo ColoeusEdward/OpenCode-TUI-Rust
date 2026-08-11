@@ -75,13 +75,22 @@ impl App {
     }
 
     pub fn with_theme(client: Arc<ApiClient>, theme: Theme) -> Self {
+        Self::with_catalog(client, theme, CatalogState::persistent())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_tests(client: Arc<ApiClient>) -> Self {
+        Self::with_catalog(client, Theme::default(), CatalogState::default())
+    }
+
+    fn with_catalog(client: Arc<ApiClient>, theme: Theme, catalog: CatalogState) -> Self {
         Self {
             client,
             theme,
             session: SessionState::default(),
             transcript: TranscriptState::default(),
             prompt: PromptState::default(),
-            catalog: CatalogState::default(),
+            catalog,
             // The sidebar renders static status sections, so it stays where the
             // user scrolled instead of following the last line.
             sidebar_scroll: ScrollState::top_anchored(),
@@ -2039,6 +2048,8 @@ impl App {
                     self.overlay = None;
                     match command {
                         CommandOption::BuiltIn(entry) => match entry.command {
+                            SlashCommand::Build => self.switch_mode("build"),
+                            SlashCommand::Plan => self.switch_mode("plan"),
                             SlashCommand::Model => {
                                 self.overlay = Some(OverlayState::Model {
                                     query: String::new(),
@@ -4096,6 +4107,12 @@ impl App {
             .set(format!("Agent selected: {}", option.name));
     }
 
+    fn switch_mode(&mut self, mode: &str) {
+        self.catalog.select_agent(mode.to_owned());
+        self.notifications
+            .success(format!("Switched to {mode} mode"));
+    }
+
     fn select_variant_from_overlay(&mut self) {
         let Some(OverlayState::Variant { query, selected }) = self.overlay.as_ref() else {
             return;
@@ -4889,7 +4906,7 @@ mod tests {
             workspace: None,
         })
         .expect("test client should build");
-        App::new(Arc::new(client))
+        App::new_for_tests(Arc::new(client))
     }
 
     #[test]
@@ -5845,6 +5862,55 @@ mod tests {
                 && request.text_content() == "run with build"
                 && request.agent.as_deref() == Some("build")
                 && request.model.is_none()
+        ));
+    }
+
+    #[test]
+    fn plan_and_build_slash_commands_switch_the_prompt_mode() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.session.current_session = Some(Session {
+            id: "ses_mode".to_owned(),
+            ..Session::default()
+        });
+
+        for character in "/plan".chars() {
+            app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ))));
+        }
+        app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(app.catalog.selected_agent.as_deref(), Some("plan"));
+        assert!(app.prompt.composer.is_empty());
+        assert!(app.overlay.is_none());
+
+        for character in "/build".chars() {
+            app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+                KeyCode::Char(character),
+                KeyModifiers::NONE,
+            ))));
+        }
+        app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert_eq!(app.catalog.selected_agent.as_deref(), Some("build"));
+        assert_eq!(app.notifications.active(), Some("Switched to build mode"));
+
+        app.prompt.composer.set_text("implement the plan");
+        let effects = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+        ))));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Api(ApiRequest::Submit { request, .. })]
+                if request.agent.as_deref() == Some("build")
+                    && request.text_content() == "implement the plan"
         ));
     }
 

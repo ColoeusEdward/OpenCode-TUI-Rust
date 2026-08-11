@@ -1,3 +1,4 @@
+use crate::command::text_match_score;
 use crate::theme::Theme;
 use ratatui::style::Color;
 
@@ -401,18 +402,30 @@ pub fn filter_commands(query: &str) -> Vec<Command> {
         return all_commands();
     }
 
-    all_commands()
+    let mut matches = all_commands()
         .into_iter()
-        .filter(|cmd| {
-            cmd.name.to_lowercase().contains(&query_lower)
-                || cmd.description.to_lowercase().contains(&query_lower)
-                || cmd.id.to_lowercase().contains(&query_lower)
-                || cmd
+        .filter_map(|command| {
+            let score = [
+                text_match_score(command.name, &query_lower),
+                text_match_score(command.id, &query_lower).map(|score| score + 50),
+                command
                     .keybinding
-                    .map(|k| k.to_lowercase().contains(&query_lower))
-                    .unwrap_or(false)
+                    .and_then(|key| text_match_score(key, &query_lower))
+                    .map(|score| score + 100),
+                text_match_score(command.description, &query_lower).map(|score| score + 10_000),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
+            score.map(|score| (score, command))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    matches.sort_by(|(left_score, left), (right_score, right)| {
+        left_score
+            .cmp(right_score)
+            .then_with(|| left.name.cmp(right.name))
+    });
+    matches.into_iter().map(|(_, command)| command).collect()
 }
 
 #[cfg(test)]
@@ -448,6 +461,19 @@ mod tests {
         let results = filter_commands("ctrl");
         assert!(!results.is_empty());
         assert!(results.iter().any(|c| c.keybinding == Some("Ctrl-A")));
+    }
+
+    #[test]
+    fn filter_commands_orders_stronger_matches_first() {
+        let results = filter_commands("session");
+
+        assert_eq!(results[0].id, "session_diff");
+        assert!(
+            results
+                .iter()
+                .position(|command| command.id == "new_session")
+                .is_some_and(|position| position > 0)
+        );
     }
 
     #[test]

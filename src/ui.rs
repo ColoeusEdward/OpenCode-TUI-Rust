@@ -3103,7 +3103,7 @@ mod tests {
             workspace: None,
         })
         .expect("test client should build");
-        App::new(Arc::new(client))
+        App::new_for_tests(Arc::new(client))
     }
 
     fn rendered(app: &mut App) -> String {
@@ -3218,7 +3218,7 @@ mod tests {
             workspace: None,
         })
         .expect("test client should build");
-        let mut app = App::new(Arc::new(client));
+        let mut app = App::new_for_tests(Arc::new(client));
 
         let output = rendered(&mut app);
 
