@@ -1,0 +1,57 @@
+name: Release Windows executable
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release executable
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Package executable
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $packageName = "opencode-tui-rust-$version-windows-x86_64"
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $staging = Join-Path $dist $packageName
+          $binary = Join-Path $env:GITHUB_WORKSPACE 'target\x86_64-pc-windows-msvc\release\opencode-tui-rust.exe'
+          $zip = Join-Path $dist "$packageName.zip"
+          $checksum = Join-Path $dist "$packageName.sha256"
+
+          New-Item -ItemType Directory -Path $staging -Force | Out-Null
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $staging 'opencode-tui-rust.exe')
+          Compress-Archive -Path (Join-Path $staging 'opencode-tui-rust.exe') -DestinationPath $zip -Force
+
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path -Leaf $zip)" | Set-Content -Path $checksum -Encoding ascii
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: OpenCode TUI Rust ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.zip
+            dist/*.sha256
