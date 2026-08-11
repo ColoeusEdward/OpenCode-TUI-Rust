@@ -10,6 +10,7 @@ use tracing::warn;
 
 const MAX_RECENT_MODELS: usize = 10;
 const RECENT_MODELS_FILE: &str = "recent_models.json";
+const SELECTED_MODELS_FILE: &str = "selected_models.json";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RecentModelEntry {
@@ -22,6 +23,21 @@ struct RecentModelEntry {
 struct RecentModelsFile {
     #[serde(default)]
     models: Vec<RecentModelEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct SelectedModelEntry {
+    id: String,
+    #[serde(rename = "providerID")]
+    provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    variant: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct SelectedModelsFile {
+    #[serde(default)]
+    sessions: HashMap<String, SelectedModelEntry>,
 }
 
 pub struct CatalogState {
@@ -38,6 +54,8 @@ pub struct CatalogState {
     pub recent_models: Vec<ModelRef>,
     pub selected_agent: Option<String>,
     recent_models_path: Option<PathBuf>,
+    selected_models: HashMap<String, ModelRef>,
+    selected_models_path: Option<PathBuf>,
 }
 
 impl Default for CatalogState {
@@ -48,10 +66,22 @@ impl Default for CatalogState {
 
 impl CatalogState {
     pub fn persistent() -> Self {
-        Self::with_recent_models_path(Self::default_recent_models_path())
+        let recent_models_path = Self::default_recent_models_path();
+        let selected_models_path = recent_models_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map(|parent| parent.join(SELECTED_MODELS_FILE));
+        Self::with_persistence_paths(recent_models_path, selected_models_path)
     }
 
     fn with_recent_models_path(path: Option<PathBuf>) -> Self {
+        Self::with_persistence_paths(path, None)
+    }
+
+    fn with_persistence_paths(
+        recent_models_path: Option<PathBuf>,
+        selected_models_path: Option<PathBuf>,
+    ) -> Self {
         Self {
             providers: Vec::new(),
             provider_defaults: HashMap::new(),
@@ -63,9 +93,11 @@ impl CatalogState {
             server_workspace_files: Vec::new(),
             server_file_query: None,
             selected_model: None,
-            recent_models: load_recent_models(path.as_deref()),
+            recent_models: load_recent_models(recent_models_path.as_deref()),
             selected_agent: None,
-            recent_models_path: path,
+            recent_models_path,
+            selected_models: load_selected_models(selected_models_path.as_deref()),
+            selected_models_path,
         }
     }
 
@@ -157,6 +189,23 @@ impl CatalogState {
         self.save_recent_models();
     }
 
+    pub fn select_model_for_session(&mut self, session_id: &str, model: ModelRef) {
+        self.select_model(model.clone());
+        self.remember_model_for_session(session_id, model);
+    }
+
+    pub fn model_for_session(&self, session_id: &str) -> Option<ModelRef> {
+        self.selected_models.get(session_id).cloned()
+    }
+
+    pub fn remember_model_for_session(&mut self, session_id: &str, model: ModelRef) {
+        if session_id.is_empty() {
+            return;
+        }
+        self.selected_models.insert(session_id.to_owned(), model);
+        self.save_selected_models();
+    }
+
     pub fn select_agent(&mut self, agent: String) {
         self.selected_agent = Some(agent);
     }
@@ -186,6 +235,40 @@ impl CatalogState {
         }
         if let Err(error) = fs::write(path, content) {
             warn!(path = %path.display(), %error, "failed to persist recent models");
+        }
+    }
+
+    fn save_selected_models(&self) {
+        let Some(path) = self.selected_models_path.as_deref() else {
+            return;
+        };
+        let file = SelectedModelsFile {
+            sessions: self
+                .selected_models
+                .iter()
+                .map(|(session_id, model)| {
+                    (
+                        session_id.clone(),
+                        SelectedModelEntry {
+                            id: model.id.clone(),
+                            provider_id: model.provider_id.clone(),
+                            variant: model.variant.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let Ok(content) = serde_json::to_string_pretty(&file) else {
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            warn!(path = %parent.display(), %error, "failed to create selected model directory");
+            return;
+        }
+        if let Err(error) = fs::write(path, content) {
+            warn!(path = %path.display(), %error, "failed to persist selected models");
         }
     }
 }
@@ -222,6 +305,36 @@ fn load_recent_models(path: Option<&Path>) -> Vec<ModelRef> {
         }
     }
     models
+}
+
+fn load_selected_models(path: Option<&Path>) -> HashMap<String, ModelRef> {
+    let Some(path) = path else {
+        return HashMap::new();
+    };
+    let Ok(content) = fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let Ok(file) = serde_json::from_str::<SelectedModelsFile>(&content) else {
+        warn!(path = %path.display(), "failed to parse persisted selected models");
+        return HashMap::new();
+    };
+
+    file.sessions
+        .into_iter()
+        .filter(|(session_id, entry)| {
+            !session_id.is_empty() && !entry.id.is_empty() && !entry.provider_id.is_empty()
+        })
+        .map(|(session_id, entry)| {
+            (
+                session_id,
+                ModelRef {
+                    id: entry.id,
+                    provider_id: entry.provider_id,
+                    variant: entry.variant,
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -328,6 +441,54 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("provider-b", "model-b"), ("provider-a", "model-a")]
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn selected_models_survive_and_stay_scoped_to_sessions() {
+        let path = test_path("selected-models");
+        let _ = std::fs::remove_file(&path);
+
+        let mut first = CatalogState::with_persistence_paths(None, Some(path.clone()));
+        first.select_model_for_session(
+            "session-a",
+            ModelRef {
+                provider_id: "provider-a".to_owned(),
+                id: "model-a".to_owned(),
+                variant: Some("high".to_owned()),
+            },
+        );
+        first.select_model_for_session(
+            "session-b",
+            ModelRef {
+                provider_id: "provider-b".to_owned(),
+                id: "model-b".to_owned(),
+                ..ModelRef::default()
+            },
+        );
+
+        let restored = CatalogState::with_persistence_paths(None, Some(path.clone()));
+        assert_eq!(
+            restored.model_for_session("session-a").map(|model| (
+                model.provider_id,
+                model.id,
+                model.variant
+            )),
+            Some((
+                "provider-a".to_owned(),
+                "model-a".to_owned(),
+                Some("high".to_owned())
+            ))
+        );
+        assert_eq!(
+            restored.model_for_session("session-b").map(|model| (
+                model.provider_id,
+                model.id,
+                model.variant
+            )),
+            Some(("provider-b".to_owned(), "model-b".to_owned(), None))
+        );
+        assert!(restored.model_for_session("session-c").is_none());
         let _ = std::fs::remove_file(path);
     }
 

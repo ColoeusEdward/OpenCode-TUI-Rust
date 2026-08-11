@@ -461,7 +461,7 @@ impl App {
                 if let ServerEventData::SessionNextModelSwitched(payload) = event.data.as_ref()
                     && self.is_current_session(&payload.session_id)
                 {
-                    self.catalog.select_model(payload.model.clone());
+                    self.select_model_for_current_session(payload.model.clone());
                     self.apply_model_switch(&payload.session_id, &payload.model);
                     self.touch_session(&payload.session_id, payload.timestamp);
                     let model_label = payload
@@ -1464,7 +1464,7 @@ impl App {
                     Ok(session) => {
                         let session_id = session.id.clone();
                         self.upsert_session(session);
-                        self.select_latest_model_for_new_session();
+                        self.select_latest_model_for_new_session(&session_id);
                         self.select_session(&session_id);
                         self.session.opening_session = Some(session_id.clone());
                         self.notifications.set(match provider_error {
@@ -1497,6 +1497,7 @@ impl App {
                         if self.is_current_session(&snapshot.session.id) {
                             let session_id = snapshot.session.id.clone();
                             self.apply_snapshot(snapshot);
+                            self.restore_model_for_session(&session_id);
                             return vec![
                                 Effect::Api(ApiRequest::ListSessionTodos(session_id.clone())),
                                 Effect::Api(ApiRequest::ListSessionDiff(session_id.clone())),
@@ -4068,6 +4069,19 @@ impl App {
         }
     }
 
+    fn select_model_for_current_session(&mut self, model: ModelRef) {
+        let session_id = self
+            .session
+            .current_session
+            .as_ref()
+            .map(|session| session.id.clone());
+        if let Some(session_id) = session_id {
+            self.catalog.select_model_for_session(&session_id, model);
+        } else {
+            self.catalog.select_model(model);
+        }
+    }
+
     fn select_model_from_overlay(&mut self) {
         let Some(OverlayState::Model { query, selected }) = self.overlay.as_ref() else {
             return;
@@ -4080,7 +4094,7 @@ impl App {
             self.notifications.set("No matching models".to_owned());
             return;
         };
-        self.catalog.select_model(option.model_ref());
+        self.select_model_for_current_session(option.model_ref());
         self.finish_prompt_secondary();
         self.notifications.set(format!(
             "Model selected: {}/{}",
@@ -4146,7 +4160,7 @@ impl App {
         };
         let mut selected_model = model;
         selected_model.variant = (option.name != "default").then_some(option.name.clone());
-        self.catalog.select_model(selected_model);
+        self.select_model_for_current_session(selected_model);
         self.finish_prompt_secondary();
         self.notifications
             .set(format!("Variant selected: {}", option.name));
@@ -4523,7 +4537,7 @@ impl App {
         self.runtime.mark_connected();
     }
 
-    fn select_latest_model_for_new_session(&mut self) {
+    fn select_latest_model_for_new_session(&mut self, session_id: &str) {
         let catalog_loaded = !self.catalog.providers.is_empty();
         let available = |model: &ModelRef| !catalog_loaded || self.catalog.has_model(model);
         let selected = self
@@ -4550,7 +4564,46 @@ impl App {
             })
             .max_by_key(|(updated, _)| *updated)
             .map(|(_, model)| model);
-        self.catalog.selected_model = selected.or(latest_session).or(recent);
+        let selected = selected.or(latest_session).or(recent);
+        self.catalog.selected_model = selected.clone();
+        if let Some(model) = selected {
+            self.catalog.remember_model_for_session(session_id, model);
+        }
+    }
+
+    fn restore_model_for_session(&mut self, session_id: &str) {
+        let catalog_loaded = !self.catalog.providers.is_empty();
+        let available = |model: &ModelRef| !catalog_loaded || self.catalog.has_model(model);
+        let persisted = self
+            .catalog
+            .model_for_session(session_id)
+            .filter(&available);
+        let session_model = self
+            .session
+            .current_session
+            .as_ref()
+            .and_then(|session| session.model.clone())
+            .filter(&available);
+        let transcript_model = self
+            .transcript
+            .iter()
+            .rev()
+            .find_map(|message| {
+                let info = &message.info;
+                (!info.provider_id.is_empty() && !info.model_id.is_empty()).then(|| ModelRef {
+                    id: info.model_id.clone(),
+                    provider_id: info.provider_id.clone(),
+                    variant: None,
+                })
+            })
+            .filter(&available);
+        let recent = self
+            .catalog
+            .recent_models
+            .iter()
+            .find(|model| available(model))
+            .cloned();
+        self.catalog.selected_model = persisted.or(session_model).or(transcript_model).or(recent);
     }
 
     fn set_permissions(&mut self, permissions: Vec<PermissionRequest>) {
@@ -4611,6 +4664,7 @@ impl App {
         self.integrations.clear_session_panels();
         self.session.children.clear();
         self.apply_snapshot(snapshot);
+        self.restore_model_for_session(&session_id);
         self.select_session(&session_id);
         self.session.screen = Screen::Session;
         self.prepare_current_question_draft();
@@ -5794,6 +5848,64 @@ mod tests {
                     })
                 && request.agent.is_none()
         ));
+    }
+
+    #[test]
+    fn opening_sessions_restores_their_selected_models_independently() {
+        let mut app = app();
+        app.session.sessions = vec![
+            Session {
+                id: "session-a".to_owned(),
+                ..Session::default()
+            },
+            Session {
+                id: "session-b".to_owned(),
+                ..Session::default()
+            },
+        ];
+        let model_a = ModelRef {
+            provider_id: "provider-a".to_owned(),
+            id: "model-a".to_owned(),
+            variant: Some("high".to_owned()),
+        };
+        let model_b = ModelRef {
+            provider_id: "provider-b".to_owned(),
+            id: "model-b".to_owned(),
+            ..ModelRef::default()
+        };
+
+        app.session.current_session = Some(app.session.sessions[0].clone());
+        app.select_model_for_current_session(model_a.clone());
+        app.session.current_session = Some(app.session.sessions[1].clone());
+        app.select_model_for_current_session(model_b.clone());
+
+        app.session.opening_session = Some("session-a".to_owned());
+        app.apply_opened_session(SessionSnapshot {
+            session: app.session.sessions[0].clone(),
+            messages: Vec::new(),
+        });
+        assert_eq!(
+            app.active_model_ref().map(|model| model.variant),
+            Some(Some("high".to_owned()))
+        );
+        assert_eq!(
+            app.active_model_ref().map(|model| model.id),
+            Some("model-a".to_owned())
+        );
+
+        app.session.opening_session = Some("session-b".to_owned());
+        app.apply_opened_session(SessionSnapshot {
+            session: app.session.sessions[1].clone(),
+            messages: Vec::new(),
+        });
+        assert_eq!(
+            app.active_model_ref().map(|model| model.id),
+            Some("model-b".to_owned())
+        );
+        assert!(
+            app.active_model_ref()
+                .is_some_and(|model| model.variant.is_none())
+        );
     }
 
     #[test]
