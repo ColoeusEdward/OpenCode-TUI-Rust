@@ -149,8 +149,8 @@ impl App {
             AppMsg::Api(result) => self.handle_api_result(*result),
             AppMsg::Tick => {
                 self.notifications.tick();
-                // The cursor blink phase is advanced by its own faster timer; see
-                // `App::advance_cursor_blink`.
+                // Cursor timing is advanced directly by the runtime around every
+                // event; this reducer tick remains for slow application state.
                 Vec::new()
             }
         }
@@ -4446,15 +4446,21 @@ impl App {
 
     /// Advances the prompt cursor blink phase.
     ///
-    /// Driven by a dedicated frame timer rather than `AppMsg::Tick`, because the
-    /// thinking blink is faster than the tick interval and the cursor is drawn by
-    /// this application rather than by the terminal.
+    /// The runtime calls this before handling each event, charging elapsed time
+    /// to the state that was visible while it waited.
     pub fn advance_cursor_blink(&mut self, delta: std::time::Duration) {
         // `runtime.working` is the thinking state: it is set while a session is
         // producing a response and cleared when the step ends or fails.
         self.prompt
             .composer
             .advance_blink(delta, self.runtime.working);
+    }
+
+    /// Returns how long the runtime can sleep before cursor visibility changes.
+    pub fn next_cursor_blink_transition_in(&self) -> Option<std::time::Duration> {
+        self.prompt
+            .composer
+            .next_blink_transition_in(self.runtime.working)
     }
 
     #[allow(dead_code)]

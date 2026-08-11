@@ -122,6 +122,12 @@ impl PromptState {
         self.queued.len()
     }
 
+    pub(crate) fn queued_prompts(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.queued
+            .iter()
+            .map(|submission| submission.prompt.as_str())
+    }
+
     pub fn restore_pending(&mut self) {
         let Some(pending) = self.pending.take() else {
             return;
@@ -147,8 +153,8 @@ impl PromptState {
 
 #[cfg(test)]
 mod tests {
-    use super::{PromptPanelItem, PromptState};
-    use crate::model::PromptPart;
+    use super::{PromptPanelItem, PromptState, PromptSubmission};
+    use crate::model::{PromptPart, PromptRequest};
 
     #[test]
     fn panel_items_keep_actions_and_queued_parts_in_stable_order() {
@@ -243,5 +249,33 @@ mod tests {
             state.subtasks.as_slice(),
             [PromptPart::Subtask { agent, .. }] if agent == "explore"
         ));
+    }
+
+    #[test]
+    fn queued_prompt_view_follows_fifo_until_dequeue() {
+        let mut state = PromptState::default();
+        for prompt in ["first queued", "second queued"] {
+            state.enqueue(PromptSubmission {
+                session_id: Some("ses_queue".to_owned()),
+                request: PromptRequest::from_text(prompt, None, None),
+                prompt: prompt.to_owned(),
+                attachments: Vec::new(),
+                subtasks: Vec::new(),
+            });
+        }
+
+        assert_eq!(
+            state.queued_prompts().collect::<Vec<_>>(),
+            vec!["first queued", "second queued"]
+        );
+
+        let dispatched = state
+            .dequeue_for_session("ses_queue")
+            .expect("the first queued prompt should dispatch");
+        assert_eq!(dispatched.prompt, "first queued");
+        assert_eq!(
+            state.queued_prompts().collect::<Vec<_>>(),
+            vec!["second queued"]
+        );
     }
 }

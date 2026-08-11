@@ -107,6 +107,11 @@ impl Composer {
         self.blink.advance(delta, thinking);
     }
 
+    /// Returns how long the runtime can sleep before cursor visibility changes.
+    pub fn next_blink_transition_in(&self, thinking: bool) -> Option<std::time::Duration> {
+        self.blink.next_transition_in(thinking)
+    }
+
     pub fn history_previous(&mut self) -> bool {
         let current = self.text();
         let Some(previous) = self.history.previous(&current) else {
@@ -225,8 +230,9 @@ impl Composer {
         frame: &mut Frame<'_>,
         area: Rect,
         theme: Theme,
+        thinking: bool,
     ) -> (Rect, Vec<String>) {
-        let cursor_visible = self.blink.is_visible();
+        let cursor_visible = !thinking || self.blink.is_visible();
         self.configure(theme);
         // Calculate content area (inside borders)
         let inner = area.inner(ratatui::layout::Margin {
@@ -538,7 +544,10 @@ mod tests {
 
     /// Renders the composer and returns the background colour of every cell on the
     /// first content row, so tests can locate the drawn cursor by its highlight.
-    fn first_row_backgrounds(composer: &mut Composer) -> Vec<ratatui::style::Color> {
+    fn first_row_backgrounds(
+        composer: &mut Composer,
+        thinking: bool,
+    ) -> Vec<ratatui::style::Color> {
         let theme = Theme::default();
         let backend = TestBackend::new(40, 5);
         let mut terminal = Terminal::new(backend).expect("test terminal should build");
@@ -553,6 +562,7 @@ mod tests {
                         height: 5,
                     },
                     theme,
+                    thinking,
                 );
             })
             .expect("test draw should succeed");
@@ -574,7 +584,7 @@ mod tests {
         let mut composer = Composer::new();
         assert!(composer.is_empty());
 
-        let backgrounds = first_row_backgrounds(&mut composer);
+        let backgrounds = first_row_backgrounds(&mut composer, false);
         assert_eq!(
             backgrounds
                 .iter()
@@ -591,24 +601,32 @@ mod tests {
     }
 
     #[test]
-    fn the_empty_prompt_cursor_still_blinks() {
+    fn the_empty_prompt_cursor_only_blinks_while_thinking() {
         let theme = Theme::default();
         let mut composer = Composer::new();
 
         assert_eq!(
-            first_row_backgrounds(&mut composer)[0],
+            first_row_backgrounds(&mut composer, true)[0],
             theme.prompt_cursor,
             "a fresh blink phase starts visible"
         );
 
-        // Advance past the idle half-period so the blink turns the cursor off.
-        composer.advance_blink(std::time::Duration::from_millis(650), false);
+        let transition = composer
+            .next_blink_transition_in(true)
+            .expect("thinking should schedule a transition");
+        composer.advance_blink(transition + std::time::Duration::from_millis(1), true);
         assert_ne!(
-            first_row_backgrounds(&mut composer)[0],
+            first_row_backgrounds(&mut composer, true)[0],
             theme.prompt_cursor,
             "the empty-prompt cursor should follow the same blink phase as a \
-             cursor sitting on text"
+              cursor sitting on text"
         );
+        assert_eq!(
+            first_row_backgrounds(&mut composer, false)[0],
+            theme.prompt_cursor,
+            "the cursor should stay visible while the session is idle"
+        );
+        assert!(composer.next_blink_transition_in(false).is_none());
     }
 
     #[test]

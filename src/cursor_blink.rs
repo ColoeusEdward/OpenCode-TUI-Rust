@@ -3,27 +3,18 @@
 //! The Composer draws its own cursor as a styled span, so blinking is decided at
 //! render time from elapsed wall-clock time rather than by the terminal.
 //!
-//! While the session is thinking the cursor blinks fast, and the period drifts
-//! inside a bounded range instead of holding one exact rate, which reads as
-//! activity rather than as a fixed indicator. Idle blinking uses a single calm
-//! period. The drift is deterministic for a given elapsed time so rendering the
-//! same frame twice cannot produce two different results.
+//! While the session is thinking the cursor blinks, and the period drifts inside
+//! a bounded range instead of holding one exact rate, which reads as activity
+//! rather than as a fixed indicator. While idle the cursor stays visible and no
+//! blink timer is scheduled. The drift is deterministic for a given elapsed time
+//! so rendering the same frame twice cannot produce two different results.
 
 use std::time::Duration;
 
-/// Blink period when the session is idle.
-const IDLE_PERIOD: Duration = Duration::from_millis(600);
-
 /// Bounds for the thinking-state period. The midpoint is the nominal fast rate
 /// and the drift moves the period between these two values.
-const THINKING_MIN_PERIOD: Duration = Duration::from_millis(90);
-const THINKING_MAX_PERIOD: Duration = Duration::from_millis(210);
-
-/// The shortest half-period this module can produce.
-///
-/// Exposed so the render loop can prove its frame interval samples the blink
-/// fast enough; a frame rate slower than this aliases the fast blink away.
-pub const MIN_HALF_PERIOD: Duration = THINKING_MIN_PERIOD;
+const THINKING_MIN_PERIOD: Duration = Duration::from_millis(240);
+const THINKING_MAX_PERIOD: Duration = Duration::from_millis(420);
 
 /// How long one full sweep from the minimum period to the maximum and back takes.
 /// Slow relative to the blink itself, so the rate change is perceptible as drift
@@ -68,6 +59,16 @@ impl CursorBlink {
     /// The caller passes the same state it will render with, so the phase always
     /// advances at the rate the user is about to see.
     pub fn advance(&mut self, delta: Duration, thinking: bool) {
+        if !thinking {
+            self.restart();
+            return;
+        }
+
+        // Capture the period before advancing the drift accumulator. This keeps
+        // a timer armed from `next_transition_in` aligned with the same phase
+        // rate used when that timer wakes.
+        let period = self.period().as_secs_f64().max(f64::MIN_POSITIVE);
+
         // The drift sweep is periodic, so the accumulator can wrap on a whole
         // number of drift cycles without moving the sweep position.
         let wrap = DRIFT_CYCLE.saturating_mul(64);
@@ -76,7 +77,6 @@ impl CursorBlink {
             self.elapsed -= wrap;
         }
 
-        let period = self.period(thinking).as_secs_f64().max(f64::MIN_POSITIVE);
         self.half_periods += delta.as_secs_f64() / period;
         // Keep the phase counter small and on an even boundary, so wrapping never
         // flips the cursor's visibility.
@@ -98,11 +98,21 @@ impl CursorBlink {
         (self.half_periods as u64).is_multiple_of(2)
     }
 
-    /// The current half-period, i.e. how long the cursor stays in one state.
-    fn period(&self, thinking: bool) -> Duration {
+    /// Time until the cursor next changes visibility.
+    ///
+    /// This lets the render loop sleep until a real visual change instead of
+    /// polling the cursor at an animation frame rate.
+    pub fn next_transition_in(&self, thinking: bool) -> Option<Duration> {
         if !thinking {
-            return IDLE_PERIOD;
+            return None;
         }
+        let period = self.period().as_secs_f64().max(f64::MIN_POSITIVE);
+        let remaining = (1.0 - self.half_periods.fract()).max(f64::EPSILON);
+        Some(Duration::from_secs_f64(period * remaining).max(Duration::from_millis(1)))
+    }
+
+    /// The current half-period, i.e. how long the cursor stays in one state.
+    fn period(&self) -> Duration {
         let min = THINKING_MIN_PERIOD.as_nanos();
         let max = THINKING_MAX_PERIOD.as_nanos();
         let span = max.saturating_sub(min);
@@ -128,26 +138,22 @@ impl CursorBlink {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CursorBlink, DRIFT_CYCLE, IDLE_PERIOD, MIN_HALF_PERIOD, THINKING_MAX_PERIOD,
-        THINKING_MIN_PERIOD,
-    };
+    use super::{CursorBlink, DRIFT_CYCLE, THINKING_MAX_PERIOD, THINKING_MIN_PERIOD};
     use std::time::Duration;
 
-    /// A frame interval that samples the fastest blink several times per
-    /// half-period, matching what the render loop uses.
+    /// A small sampling interval used only to test the phase model.
     const FRAME: Duration = Duration::from_millis(10);
 
     /// Samples visibility over `duration` and returns the length in frames of each
     /// on/off run.
-    fn run_lengths(thinking: bool, duration: Duration) -> Vec<usize> {
+    fn run_lengths(duration: Duration) -> Vec<usize> {
         let mut blink = CursorBlink::new();
         let mut runs = Vec::new();
         let mut current = blink.is_visible();
         let mut length = 0usize;
         let frames = duration.as_nanos() / FRAME.as_nanos();
         for _ in 0..frames {
-            blink.advance(FRAME, thinking);
+            blink.advance(FRAME, true);
             let next = blink.is_visible();
             length += 1;
             if next != current {
@@ -165,25 +171,19 @@ mod tests {
     }
 
     #[test]
-    fn idle_blinking_alternates_on_a_fixed_period() {
+    fn idle_cursor_stays_visible_without_a_timer() {
         let mut blink = CursorBlink::new();
-        blink.advance(IDLE_PERIOD, false);
-        assert!(!blink.is_visible());
-        blink.advance(IDLE_PERIOD, false);
+        blink.advance(Duration::from_secs(60), false);
+
         assert!(blink.is_visible());
+        assert_eq!(blink.next_transition_in(false), None);
     }
 
     #[test]
-    fn thinking_blinks_several_times_faster_than_idle() {
-        let window = Duration::from_secs(4);
-        let idle = run_lengths(false, window).len();
-        let thinking = run_lengths(true, window).len();
+    fn thinking_cursor_blinks() {
+        let runs = run_lengths(Duration::from_secs(4));
 
-        assert!(
-            thinking >= idle * 3,
-            "the thinking cursor should blink several times faster than idle, \
-             got {thinking} runs vs {idle} over {window:?}"
-        );
+        assert!(!runs.is_empty(), "the thinking cursor should blink");
     }
 
     #[test]
@@ -193,7 +193,7 @@ mod tests {
         // backwards, producing runs far longer than the configured maximum — an
         // irregular twitch rather than a blink. Integrating the phase keeps every
         // run within the bounds.
-        let runs = run_lengths(true, DRIFT_CYCLE * 3);
+        let runs = run_lengths(DRIFT_CYCLE * 3);
         assert!(!runs.is_empty(), "the thinking cursor should blink at all");
 
         let frame_ms = FRAME.as_millis() as usize;
@@ -212,7 +212,7 @@ mod tests {
 
     #[test]
     fn the_thinking_rate_actually_drifts_across_a_cycle() {
-        let runs = run_lengths(true, DRIFT_CYCLE * 3);
+        let runs = run_lengths(DRIFT_CYCLE * 3);
         let shortest = runs.iter().min().copied().expect("runs were measured");
         let longest = runs.iter().max().copied().expect("runs were measured");
 
@@ -224,41 +224,21 @@ mod tests {
     }
 
     #[test]
-    fn the_blink_rate_follows_a_change_in_the_thinking_state() {
-        // Advancing with `thinking = true` then `false` must change the observed
-        // rate, since the rate is chosen per step rather than from total elapsed
-        // time.
+    fn leaving_the_thinking_state_resets_to_visible() {
         let mut blink = CursorBlink::new();
-        let mut fast_flips = 0;
-        let mut previous = blink.is_visible();
-        for _ in 0..100 {
-            blink.advance(FRAME, true);
-            if blink.is_visible() != previous {
-                fast_flips += 1;
-            }
-            previous = blink.is_visible();
-        }
+        blink.advance(THINKING_MIN_PERIOD + Duration::from_millis(1), true);
+        assert!(!blink.is_visible());
 
-        let mut slow_flips = 0;
-        for _ in 0..100 {
-            blink.advance(FRAME, false);
-            if blink.is_visible() != previous {
-                slow_flips += 1;
-            }
-            previous = blink.is_visible();
-        }
+        blink.advance(Duration::from_secs(1), false);
 
-        assert!(
-            fast_flips > slow_flips,
-            "the same elapsed time should produce more flips while thinking, \
-             got {fast_flips} vs {slow_flips}"
-        );
+        assert!(blink.is_visible());
+        assert_eq!(blink.next_transition_in(false), None);
     }
 
     #[test]
     fn restart_makes_the_cursor_visible_again() {
         let mut blink = CursorBlink::new();
-        blink.advance(IDLE_PERIOD, false);
+        blink.advance(THINKING_MIN_PERIOD + Duration::from_millis(1), true);
         assert!(!blink.is_visible());
 
         blink.restart();
@@ -266,17 +246,34 @@ mod tests {
     }
 
     #[test]
-    fn the_exposed_minimum_matches_the_fastest_configured_period() {
-        // The render loop asserts its frame interval against this constant, so it
-        // has to stay tied to the real minimum.
-        assert_eq!(MIN_HALF_PERIOD, THINKING_MIN_PERIOD);
+    fn next_transition_tracks_the_remaining_phase() {
+        let mut blink = CursorBlink::new();
+        blink.advance(Duration::from_millis(100), true);
+        let before = blink.is_visible();
+        let remaining = blink
+            .next_transition_in(true)
+            .expect("thinking should schedule a transition");
+        blink.advance(remaining + Duration::from_millis(1), true);
+
+        assert_ne!(blink.is_visible(), before);
+    }
+
+    #[test]
+    fn advancing_to_the_next_transition_flips_visibility() {
+        let mut blink = CursorBlink::new();
+        let transition = blink
+            .next_transition_in(true)
+            .expect("thinking should schedule a transition");
+        blink.advance(transition + Duration::from_millis(1), true);
+
+        assert!(!blink.is_visible());
     }
 
     #[test]
     fn the_accumulators_stay_bounded_over_a_long_session() {
         let mut blink = CursorBlink::new();
-        for index in 0..500_000 {
-            blink.advance(FRAME, index % 2 == 0);
+        for _ in 0..500_000 {
+            blink.advance(FRAME, true);
         }
 
         assert!(blink.elapsed < DRIFT_CYCLE * 64);

@@ -20,6 +20,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use serde_json::Value;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let theme = app.theme;
@@ -1773,13 +1774,32 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
 
     // Use virtualized rendering for better performance with large transcripts
     let transcript_area = layout[1];
-    // Paragraph with Block handles border internally, so we only need to account for the inner area
+    // Reserve the bottom of the transcript for queued prompts. That area is
+    // independent from transcript scrolling, so queued commands remain pinned.
     let transcript_width = transcript_area.width.saturating_sub(2).max(1);
-    let inner_height = transcript_area.height.saturating_sub(2) as usize;
-    // The inner_height already represents the exact visible lines; no adjustment needed
-    let viewport_height = inner_height;
+    let transcript_inner = transcript_area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let queued_lines = queued_prompt_lines(
+        app,
+        transcript_width,
+        transcript_inner.height as usize,
+        theme,
+    );
+    let queue_height = queued_lines.len().min(u16::MAX as usize) as u16;
+    let transcript_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(queue_height)])
+        .split(transcript_inner);
+    let message_area = transcript_sections[0];
+    let queue_area = transcript_sections[1];
+    let viewport_height = message_area.height as usize;
 
-    let lines = if app.transcript.is_empty() {
+    let lines = if viewport_height == 0 {
+        app.transcript.scroll.observe(0, 0);
+        Vec::new()
+    } else if app.transcript.is_empty() {
         app.transcript.scroll.observe(0, viewport_height as u16);
         app.transcript.scroll.clear_anchor();
         vec![Line::from(Span::styled(
@@ -1828,27 +1848,26 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
         lines
     };
 
-    // Recorded before the lines are moved into the widget. The selectable region
-    // is the area inside the border, and the rows are the same visible lines the
-    // widget is about to draw, so a selection slices exactly what is on screen.
-    let transcript_inner = transcript_area.inner(Margin {
-        vertical: 1,
-        horizontal: 1,
-    });
-    app.selection.record_pane(
-        SelectionPane::Transcript,
-        transcript_inner,
-        lines.iter().map(line_text).collect(),
-    );
+    // Selection rows include padding between short transcript content and the
+    // bottom-pinned queue so their indices continue to match screen coordinates.
+    let mut selection_rows = lines.iter().map(line_text).collect::<Vec<_>>();
+    selection_rows.resize(message_area.height as usize, String::new());
+    selection_rows.extend(queued_lines.iter().map(line_text));
+    app.selection
+        .record_pane(SelectionPane::Transcript, transcript_inner, selection_rows);
 
-    // Lines are pre-wrapped in transcript_view to account for terminal width
-    let transcript = Paragraph::new(lines).block(
+    frame.render_widget(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme.border))
             .title("Transcript"),
+        transcript_area,
     );
-    frame.render_widget(transcript, transcript_area);
+    // Lines are pre-wrapped in transcript_view to account for terminal width.
+    frame.render_widget(Paragraph::new(lines), message_area);
+    if queue_height > 0 {
+        frame.render_widget(Paragraph::new(queued_lines), queue_area);
+    }
 
     if pending_height > 0 {
         draw_pending(frame, app, layout[2], theme);
@@ -1858,7 +1877,10 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
         draw_attachments(frame, app, layout[3], theme);
     }
 
-    let (prompt_inner, prompt_rows) = app.prompt.composer.render(frame, layout[4], theme);
+    let (prompt_inner, prompt_rows) =
+        app.prompt
+            .composer
+            .render(frame, layout[4], theme, app.runtime.working);
     app.selection
         .record_pane(SelectionPane::Prompt, prompt_inner, prompt_rows);
 
@@ -2660,6 +2682,59 @@ fn truncate_sidebar_text(text: &str, limit: usize) -> String {
     value
 }
 
+fn queued_prompt_lines(app: &App, width: u16, max_rows: usize, theme: Theme) -> Vec<Line<'static>> {
+    app.prompt
+        .queued_prompts()
+        .take(max_rows)
+        .enumerate()
+        .map(|(index, prompt)| {
+            let prefix = format!("[queued {}] ", index + 1);
+            let prefix_width = UnicodeWidthStr::width(prefix.as_str());
+            let available = usize::from(width).saturating_sub(prefix_width);
+            let prompt = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+            let prompt = if prompt.is_empty() {
+                "(non-text prompt)".to_owned()
+            } else {
+                truncate_to_display_width(&prompt, available)
+            };
+            Line::from(vec![
+                Span::styled(
+                    prefix,
+                    Style::default()
+                        .fg(theme.secondary)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(prompt, Style::default().fg(theme.text)),
+            ])
+            .style(Style::default().bg(theme.background_element))
+        })
+        .collect()
+}
+
+fn truncate_to_display_width(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_owned();
+    }
+
+    let suffix = if width >= 3 { "..." } else { "" };
+    let content_width = width.saturating_sub(suffix.len());
+    let mut used = 0;
+    let mut value = String::new();
+    for character in text.chars() {
+        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + character_width > content_width {
+            break;
+        }
+        value.push(character);
+        used += character_width;
+    }
+    value.push_str(suffix);
+    value
+}
+
 fn todo_status_marker(status: &str) -> &'static str {
     match status {
         "completed" => "[x]",
@@ -3000,10 +3075,11 @@ mod tests {
     use crate::event::{RevertFileDiff, RevertFileStatus, RevertState};
     use crate::model::{
         AgentInfo, CacheTokens, FileDiff, McpServer, MessageInfo, MessageTime, MessageWithParts,
-        ModelInfo, ModelLimit, ModelRef, Part, PermissionRequest, PromptPart, ProviderInfo,
-        Session, Skill, TodoItem, TokenUsage, VcsDiffMode, VcsFileDiff, VcsFileStatus, VcsInfo,
-        WorkspaceFile,
+        ModelInfo, ModelLimit, ModelRef, Part, PermissionRequest, PromptPart, PromptRequest,
+        ProviderInfo, Session, Skill, TodoItem, TokenUsage, VcsDiffMode, VcsFileDiff,
+        VcsFileStatus, VcsInfo, WorkspaceFile,
     };
+    use crate::prompt_state::PromptSubmission;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::collections::HashMap;
@@ -3035,6 +3111,10 @@ mod tests {
     }
 
     fn rendered_at(app: &mut App, width: u16, height: u16) -> String {
+        rendered_rows_at(app, width, height).concat()
+    }
+
+    fn rendered_rows_at(app: &mut App, width: u16, height: u16) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).expect("test terminal should build");
         terminal
@@ -3042,15 +3122,53 @@ mod tests {
             .expect("test draw should succeed");
         let buffer = terminal.backend().buffer();
         (0..height)
-            .flat_map(|y| {
-                (0..width).map(move |x| {
-                    buffer
-                        .cell((x, y))
-                        .expect("test coordinates should be inside the buffer")
-                        .symbol()
-                })
+            .map(|y| {
+                (0..width)
+                    .map(|x| {
+                        buffer
+                            .cell((x, y))
+                            .expect("test coordinates should be inside the buffer")
+                            .symbol()
+                    })
+                    .collect::<String>()
             })
-            .collect::<String>()
+            .collect()
+    }
+
+    #[test]
+    fn queued_prompts_are_pinned_to_the_transcript_bottom_in_fifo_order() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.runtime.sidebar_visible = false;
+        app.session.current_session = Some(Session {
+            id: "ses_queue".to_owned(),
+            ..Session::default()
+        });
+        for prompt in ["first queued", "second queued"] {
+            app.prompt.enqueue(PromptSubmission {
+                session_id: Some("ses_queue".to_owned()),
+                request: PromptRequest::from_text(prompt, None, None),
+                prompt: prompt.to_owned(),
+                attachments: Vec::new(),
+                subtasks: Vec::new(),
+            });
+        }
+
+        let rows = rendered_rows_at(&mut app, 80, 24);
+        let first_row = rows
+            .iter()
+            .position(|row| row.contains("[queued 1] first queued"))
+            .expect("the first queued prompt should render");
+        let second_row = rows
+            .iter()
+            .position(|row| row.contains("[queued 2] second queued"))
+            .expect("the second queued prompt should render");
+
+        assert_eq!(second_row, first_row + 1);
+        assert!(
+            first_row > 24 / 2,
+            "the queue should be pinned near the bottom"
+        );
     }
 
     #[test]

@@ -34,39 +34,35 @@ use anyhow::{Context, Result};
 use api::{ApiClient, ClientConfig};
 use app::App;
 use clap::Parser;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste, EventStream};
+use crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use runtime::{AppMsg, Effect, execute_export, execute_request};
+use std::collections::VecDeque;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use theme::Theme;
 use tokio::sync::mpsc;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::time::{MissedTickBehavior, interval, sleep};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 /// Reducer tick: notice expiry and other slow periodic state.
 const TICK_INTERVAL: Duration = Duration::from_millis(250);
 
-/// Redraw interval used to animate the prompt cursor.
-///
-/// Must be well under the fastest blink half-period or the blink aliases and
-/// reads as a slow, irregular flicker. See the assertion below.
-const BLINK_FRAME_INTERVAL: Duration = Duration::from_millis(40);
-
-// A frame interval at or above the fastest half-period cannot represent that
-// blink at all, and one close to it beats against the blink rate. Requiring at
-// least two frames per half-period keeps the fast blink visible as a blink.
-const _: () = assert!(
-    BLINK_FRAME_INTERVAL.as_millis() * 2 <= cursor_blink::MIN_HALF_PERIOD.as_millis(),
-    "the blink frame interval must sample the fastest blink at least twice per half-period"
-);
+/// Windows console input can expose a paste as a burst of ordinary key events
+/// even when bracketed paste is enabled. Waiting for this tiny idle gap lets us
+/// deliver the burst to the editor atomically without adding perceptible typing
+/// latency.
+const PASTE_BURST_IDLE: Duration = Duration::from_millis(4);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -161,6 +157,7 @@ async fn run_app(
             .stream_events(server_sender, stream_stop)
             .await;
     });
+    let mut terminal_events = spawn_terminal_events(stop.clone());
 
     let mut app = if theme == Theme::default() {
         App::new(Arc::clone(&client))
@@ -173,26 +170,25 @@ async fn run_app(
         &message_sender,
         &stop,
     );
-    let mut input = EventStream::new();
     let mut ticks = interval(TICK_INTERVAL);
     ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    // The prompt cursor blinks faster than the runtime tick, and it is drawn as
-    // part of the frame rather than by the terminal, so its phase has to be
-    // sampled faster than the tick or the fast blink is lost to aliasing. This
-    // timer only advances the blink phase and redraws; it does not run the
-    // reducer.
-    let mut blink_frames = interval(BLINK_FRAME_INTERVAL);
-    blink_frames.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut blink_updated_at = Instant::now();
+    let mut redraw = true;
 
     loop {
         if quit {
             break;
         }
-        terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        if redraw {
+            terminal.draw(|frame| ui::draw(frame, &mut app))?;
+        }
+        let blink_delay = app.next_cursor_blink_transition_in();
         tokio::select! {
-            maybe_event = input.next() => {
+            maybe_event = terminal_events.recv() => {
+                advance_cursor_blink_clock(&mut app, &mut blink_updated_at);
                 match maybe_event {
                     Some(Ok(event)) => {
+                        redraw = true;
                         quit = spawn_effects(
                             app.update(AppMsg::Terminal(event)),
                             Arc::clone(&client),
@@ -201,6 +197,7 @@ async fn run_app(
                         );
                     }
                     Some(Err(error)) => {
+                        redraw = true;
                         warn!(error = %error, "terminal input failed");
                         app.notifications.set(format!("Terminal input failed: {error}"));
                     }
@@ -208,6 +205,8 @@ async fn run_app(
                 }
             }
             Some(event) = server_receiver.recv() => {
+                advance_cursor_blink_clock(&mut app, &mut blink_updated_at);
+                redraw = true;
                 quit = spawn_effects(
                     app.update(AppMsg::Server(event)),
                     Arc::clone(&client),
@@ -216,6 +215,8 @@ async fn run_app(
                 );
             }
             Some(message) = message_receiver.recv() => {
+                advance_cursor_blink_clock(&mut app, &mut blink_updated_at);
+                redraw = true;
                 quit = spawn_effects(
                     app.update(message),
                     Arc::clone(&client),
@@ -223,23 +224,133 @@ async fn run_app(
                     &stop,
                 );
             }
-            _ = blink_frames.tick() => {
-                // Phase only. Advancing this instead of AppMsg::Tick keeps notice
-                // expiry on the slower tick where it was calibrated.
-                app.advance_cursor_blink(BLINK_FRAME_INTERVAL);
+            _ = wait_for_cursor_blink(blink_delay) => {
+                advance_cursor_blink_clock(&mut app, &mut blink_updated_at);
+                redraw = true;
             }
             _ = ticks.tick() => {
+                advance_cursor_blink_clock(&mut app, &mut blink_updated_at);
+                let notice_was_visible = app.notifications.active().is_some();
                 quit = spawn_effects(
                     app.update(AppMsg::Tick),
                     Arc::clone(&client),
                     &message_sender,
                     &stop,
                 );
+                redraw = notice_was_visible && app.notifications.active().is_none();
             }
         }
     }
     stop.cancel();
     Ok(())
+}
+
+fn advance_cursor_blink_clock(app: &mut App, updated_at: &mut Instant) {
+    let now = Instant::now();
+    app.advance_cursor_blink(now.saturating_duration_since(*updated_at));
+    *updated_at = now;
+}
+
+async fn wait_for_cursor_blink(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => sleep(delay).await,
+        None => std::future::pending().await,
+    }
+}
+
+fn spawn_terminal_events(stop: CancellationToken) -> mpsc::Receiver<io::Result<Event>> {
+    let (sender, receiver) = mpsc::channel(256);
+    tokio::spawn(async move {
+        let mut input = EventStream::new();
+        let mut deferred = VecDeque::new();
+        loop {
+            let event = tokio::select! {
+                _ = stop.cancelled() => break,
+                event = next_terminal_event(&mut input, &mut deferred) => event,
+            };
+            let Some(event) = event else {
+                break;
+            };
+            if sender.send(event).await.is_err() {
+                break;
+            }
+        }
+    });
+    receiver
+}
+
+async fn next_terminal_event<S>(
+    input: &mut S,
+    deferred: &mut VecDeque<io::Result<Event>>,
+) -> Option<io::Result<Event>>
+where
+    S: Stream<Item = io::Result<Event>> + Unpin,
+{
+    let first = match deferred.pop_front() {
+        Some(event) => event,
+        None => input.next().await?,
+    };
+    let first_event = match first {
+        Ok(event) => event,
+        Err(error) => return Some(Err(error)),
+    };
+    let Some(mut pasted) = paste_key_fragment(&first_event) else {
+        return Some(Ok(first_event));
+    };
+    let mut event_count = 1;
+
+    loop {
+        let next = match tokio::time::timeout(PASTE_BURST_IDLE, input.next()).await {
+            Ok(Some(event)) => event,
+            Ok(None) | Err(_) => break,
+        };
+        match next {
+            Ok(event) => {
+                if let Some(fragment) = paste_key_fragment(&event) {
+                    pasted.push_str(&fragment);
+                    event_count += 1;
+                } else if is_key_release(&event) {
+                    continue;
+                } else {
+                    deferred.push_back(Ok(event));
+                    break;
+                }
+            }
+            Err(error) => {
+                deferred.push_back(Err(error));
+                break;
+            }
+        }
+    }
+
+    if event_count == 1 {
+        Some(Ok(first_event))
+    } else {
+        Some(Ok(Event::Paste(pasted)))
+    }
+}
+
+fn paste_key_fragment(event: &Event) -> Option<String> {
+    let Event::Key(key) = event else {
+        return None;
+    };
+    if key.kind != KeyEventKind::Press
+        || key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT)
+    {
+        return None;
+    }
+    match key.code {
+        KeyCode::Char(character) => Some(character.to_string()),
+        KeyCode::Enter => Some("\n".to_owned()),
+        KeyCode::Tab => Some("\t".to_owned()),
+        _ => None,
+    }
+}
+
+fn is_key_release(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Release)
 }
 
 fn spawn_effects(
@@ -367,7 +478,15 @@ impl Drop for TerminalGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_directory;
+    use super::{next_terminal_event, resolve_directory};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+    use futures_util::stream;
+    use std::collections::VecDeque;
+    use std::io;
+
+    fn key(code: KeyCode) -> io::Result<Event> {
+        Ok(Event::Key(KeyEvent::new(code, KeyModifiers::NONE)))
+    }
 
     #[test]
     fn an_absent_directory_resolves_to_the_current_directory() {
@@ -410,5 +529,54 @@ mod tests {
         let resolved = resolve_directory(Some(r"E:\does\not\exist\".to_owned()))
             .expect("an unstattable path should still resolve");
         assert_eq!(resolved, "E:/does/not/exist");
+    }
+
+    #[tokio::test]
+    async fn key_event_bursts_are_delivered_as_one_multiline_paste() {
+        let events = vec![
+            key(KeyCode::Char('f')),
+            key(KeyCode::Char('i')),
+            key(KeyCode::Char('r')),
+            key(KeyCode::Char('s')),
+            key(KeyCode::Char('t')),
+            Ok(Event::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('t'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            ))),
+            key(KeyCode::Enter),
+            key(KeyCode::Char('s')),
+            key(KeyCode::Char('e')),
+            key(KeyCode::Char('c')),
+            key(KeyCode::Char('o')),
+            key(KeyCode::Char('n')),
+            key(KeyCode::Char('d')),
+        ];
+        let mut input = stream::iter(events);
+        let mut deferred = VecDeque::new();
+
+        let event = next_terminal_event(&mut input, &mut deferred)
+            .await
+            .expect("the event stream should yield")
+            .expect("the event should parse");
+
+        assert_eq!(event, Event::Paste("first\nsecond".to_owned()));
+        assert!(deferred.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_single_enter_remains_a_submit_key() {
+        let mut input = stream::iter(vec![key(KeyCode::Enter)]);
+        let mut deferred = VecDeque::new();
+
+        let event = next_terminal_event(&mut input, &mut deferred)
+            .await
+            .expect("the event stream should yield")
+            .expect("the event should parse");
+
+        assert_eq!(
+            event,
+            Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        );
     }
 }
