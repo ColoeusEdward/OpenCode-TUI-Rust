@@ -1714,8 +1714,8 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
             Constraint::Min(3),
             Constraint::Length(pending_height),
             Constraint::Length(attachment_height),
-            Constraint::Length(5),
-            Constraint::Length(2),
+            Constraint::Length(7),
+            Constraint::Length(1),
         ])
         .split(area);
     let current_session = app.session.current_session.as_ref();
@@ -3108,7 +3108,7 @@ mod tests {
 
         assert_eq!(second_row, first_row + 1);
         assert!(
-            first_row > 24 / 2,
+            first_row >= 24 / 2,
             "the queue should be pinned near the bottom"
         );
     }

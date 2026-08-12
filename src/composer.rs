@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Padding, Paragraph};
 use tui_textarea::{CursorMove, TextArea};
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -234,11 +234,10 @@ impl Composer {
     ) -> (Rect, Vec<String>) {
         let cursor_visible = !thinking || self.blink.is_visible();
         self.configure(theme);
-        // Calculate content area (inside borders)
-        let inner = area.inner(ratatui::layout::Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
+        // The block owns the rail gap and content padding, so selection
+        // coordinates and text wrapping use the exact rendered content area.
+        let block = prompt_block(theme);
+        let inner = block.inner(area);
         let content_width = inner.width.saturating_sub(1); // Reserve 1 for cursor
         let viewport_height = inner.height;
 
@@ -322,14 +321,12 @@ impl Composer {
             ])];
         }
 
-        let paragraph = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.prompt_border))
-                .title("Prompt"),
-        );
+        let paragraph = Paragraph::new(lines)
+            .style(Style::default().fg(theme.text).bg(theme.background_element))
+            .block(block);
 
         frame.render_widget(paragraph, area);
+        render_prompt_rail(frame, area, theme);
         (inner, selectable_rows)
     }
 
@@ -442,19 +439,39 @@ impl Composer {
     }
 
     fn configure(&mut self, theme: Theme) {
-        self.textarea.set_style(Style::default().fg(theme.text));
+        self.textarea
+            .set_style(Style::default().fg(theme.text).bg(theme.background_element));
         self.textarea
             .set_placeholder_text("Type a prompt and press Enter");
         self.textarea
             .set_placeholder_style(Style::default().fg(theme.text_muted));
         self.textarea.set_cursor_style(cursor_style(theme, true));
-        self.textarea.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(theme.prompt_border))
-                .title("Prompt"),
-        );
+        self.textarea.set_block(prompt_block(theme));
     }
+}
+
+fn prompt_block(theme: Theme) -> Block<'static> {
+    Block::default()
+        .style(Style::default().bg(theme.background_element))
+        .padding(Padding::new(2, 1, 1, 1))
+}
+
+fn render_prompt_rail(frame: &mut Frame<'_>, area: Rect, theme: Theme) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let rail = (0..area.height)
+        .map(|_| Line::from(Span::styled("▍", Style::default().fg(theme.prompt_border))))
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(rail).style(Style::default().bg(theme.background_element)),
+        Rect {
+            x: area.x,
+            y: area.y,
+            width: 1,
+            height: area.height,
+        },
+    );
 }
 
 /// Style for the cell the cursor occupies.
@@ -549,7 +566,7 @@ mod tests {
         thinking: bool,
     ) -> Vec<ratatui::style::Color> {
         let theme = Theme::default();
-        let backend = TestBackend::new(40, 5);
+        let backend = TestBackend::new(40, 7);
         let mut terminal = Terminal::new(backend).expect("test terminal should build");
         terminal
             .draw(|frame| {
@@ -559,7 +576,7 @@ mod tests {
                         x: 0,
                         y: 0,
                         width: 40,
-                        height: 5,
+                        height: 7,
                     },
                     theme,
                     thinking,
@@ -567,8 +584,9 @@ mod tests {
             })
             .expect("test draw should succeed");
         let buffer = terminal.backend().buffer();
-        // Row 1 is the first line inside the block's top border.
-        (1..39)
+        // The prompt has a visually narrow rail, one column of gap, and one
+        // column of right padding around the content.
+        (2..40)
             .map(|x| {
                 buffer
                     .cell((x, 1))
@@ -627,6 +645,84 @@ mod tests {
             "the cursor should stay visible while the session is idle"
         );
         assert!(composer.next_blink_transition_in(false).is_none());
+    }
+
+    #[test]
+    fn the_prompt_uses_a_theme_background_and_only_a_thick_left_border() {
+        let theme = Theme::default();
+        let mut composer = Composer::new();
+        let backend = TestBackend::new(40, 7);
+        let mut terminal = Terminal::new(backend).expect("test terminal should build");
+
+        terminal
+            .draw(|frame| {
+                composer.render(
+                    frame,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        width: 40,
+                        height: 7,
+                    },
+                    theme,
+                    false,
+                );
+            })
+            .expect("test draw should succeed");
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(
+            buffer
+                .cell((0, 0))
+                .expect("left rail should be rendered")
+                .symbol(),
+            "▍",
+            "the prompt should render a visually narrow left rail"
+        );
+        assert_eq!(
+            buffer
+                .cell((1, 1))
+                .expect("left gap should be inside the prompt")
+                .bg,
+            theme.background_element,
+            "the prompt should leave space between the rail and text"
+        );
+        assert_eq!(
+            buffer
+                .cell((10, 1))
+                .expect("prompt content should be rendered")
+                .bg,
+            theme.background_element,
+            "the prompt content should use the active theme background"
+        );
+        assert_eq!(
+            buffer
+                .cell((10, 0))
+                .expect("top padding should be rendered")
+                .bg,
+            theme.background_element,
+            "the prompt should have top padding"
+        );
+        assert_eq!(
+            buffer
+                .cell((10, 6))
+                .expect("bottom padding should be rendered")
+                .bg,
+            theme.background_element,
+            "the prompt should have bottom padding"
+        );
+        assert_eq!(
+            buffer
+                .cell((39, 1))
+                .expect("right edge should be inside the prompt")
+                .symbol(),
+            " ",
+            "the prompt should not render a right border"
+        );
+        assert!(
+            buffer.content().iter().all(|cell| cell.symbol() != "P"),
+            "the prompt title should not be rendered"
+        );
     }
 
     #[test]

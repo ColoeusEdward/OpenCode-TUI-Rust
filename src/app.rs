@@ -6846,13 +6846,14 @@ mod tests {
     // At 80x24 with the sidebar visible, a rendered session lays out as:
     // rows 0-2 header, row 3 transcript top border, rows 4-15 transcript content
     // (row 5 the role marker, row 6 the message text), row 16 bottom border,
-    // row 17 prompt top border, rows 18-20 prompt content, row 21 prompt bottom
-    // border, row 22 footer. The transcript's inner columns are 1..=57 and the
-    // sidebar starts at column 59. These constants come from a printed frame, not
-    // from arithmetic on the constraints.
+    // row 16 prompt top padding, rows 17-20 prompt content, row 21 bottom
+    // padding, row 22 footer. The transcript's inner columns are 1..=57 and
+    // the sidebar starts at column 59. These constants come from a printed
+    // frame, not from arithmetic on the constraints.
     const TRANSCRIPT_TEXT_ROW: u16 = 6;
-    const PROMPT_TEXT_ROW: u16 = 18;
+    const PROMPT_TEXT_ROW: u16 = 17;
     const PANE_LEFT_COLUMN: u16 = 1;
+    const PROMPT_TEXT_COLUMN: u16 = 2;
 
     #[test]
     fn dragging_over_the_transcript_copies_the_selected_text() {
@@ -6948,21 +6949,21 @@ mod tests {
             .draw(|frame| crate::ui::draw(frame, &mut app))
             .expect("test draw should succeed");
 
-        // The prompt's text starts at the pane's left edge, unlike the transcript's
-        // indented message body.
+        // The prompt's text starts after the left rail and padding, unlike the
+        // transcript's indented message body.
         app.update(mouse(
             MouseEventKind::Down(MouseButton::Left),
-            PANE_LEFT_COLUMN,
+            PROMPT_TEXT_COLUMN,
             PROMPT_TEXT_ROW,
         ));
         app.update(mouse(
             MouseEventKind::Drag(MouseButton::Left),
-            PANE_LEFT_COLUMN + 5,
+            PROMPT_TEXT_COLUMN + 5,
             PROMPT_TEXT_ROW,
         ));
         let effects = app.update(mouse(
             MouseEventKind::Up(MouseButton::Left),
-            PANE_LEFT_COLUMN + 5,
+            PROMPT_TEXT_COLUMN + 5,
             PROMPT_TEXT_ROW,
         ));
 
