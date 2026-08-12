@@ -5,7 +5,7 @@ Native Rust TUI client for an `opencode serve` process.
 ![Screenshot](https://i0.wp.com/tva1.sinaimg.cn/large/9448bbf8gy1ifzy6b6lqcj211s0k643w.jpg)
 
 This project is a standalone rewrite of the core client boundary in
-`E:/Code/pj/opencode/packages/tui`. It keeps the server as the source of truth
+`<opencode-repository>/packages/tui`. It keeps the server as the source of truth
 and uses the documented HTTP API plus SSE event stream:
 
 - `GET /global/health` checks the server.
@@ -386,7 +386,7 @@ opencode-tui-rust
 Both defaults come from the environment: the server is assumed to be at
 `http://127.0.0.1:4096`, and the workspace directory is the shell's current
 directory. The session list is scoped to that directory, so running the client
-from `E:\CCE` shows only that project's sessions. Sessions the server reports
+from `<project-directory>` shows only that project's sessions. Sessions the server reports
 with no directory are still listed, since their location cannot be proven to
 differ.
 
@@ -394,7 +394,7 @@ Useful options:
 
 ```text
 --url http://127.0.0.1:4096
---directory E:\Code\pj\opencode   # overrides the current directory
+--directory <project-directory>   # overrides the current directory
 --workspace <workspace-id>
 --session <session-id>
 --password <server-password>
