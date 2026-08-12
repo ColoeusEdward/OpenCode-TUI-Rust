@@ -1714,7 +1714,7 @@ fn draw_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect, theme: Them
             Constraint::Min(3),
             Constraint::Length(pending_height),
             Constraint::Length(attachment_height),
-            Constraint::Length(7),
+            Constraint::Length(6),
             Constraint::Length(1),
         ])
         .split(area);

@@ -6844,14 +6844,14 @@ mod tests {
     }
 
     // At 80x24 with the sidebar visible, a rendered session lays out as:
-    // rows 0-2 header, row 3 transcript top border, rows 4-15 transcript content
-    // (row 5 the role marker, row 6 the message text), row 16 bottom border,
-    // row 16 prompt top padding, rows 17-20 prompt content, row 21 bottom
-    // padding, row 22 footer. The transcript's inner columns are 1..=57 and
-    // the sidebar starts at column 59. These constants come from a printed
-    // frame, not from arithmetic on the constraints.
+    // rows 0-2 header, row 3 transcript top border, rows 4-16 transcript content
+    // (row 5 the role marker, row 6 the message text), row 17 bottom border,
+    // row 17 prompt top padding, rows 18-21 prompt content, row 22 bottom
+    // padding, row 23 footer.
+    // The transcript's inner columns are 1..=57 and the sidebar starts at column
+    // 59. These constants come from a printed frame, not from constraint arithmetic.
     const TRANSCRIPT_TEXT_ROW: u16 = 6;
-    const PROMPT_TEXT_ROW: u16 = 17;
+    const PROMPT_TEXT_ROW: u16 = 18;
     const PANE_LEFT_COLUMN: u16 = 1;
     const PROMPT_TEXT_COLUMN: u16 = 2;
 

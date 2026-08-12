@@ -224,7 +224,7 @@ impl Composer {
     /// The blink rate is chosen when the phase is advanced, not here, so drawing
     /// a frame never changes the blink.
     /// Draws the prompt and returns the region and rows that mouse selection can
-    /// address: the area inside the border, and the visible text of each row.
+    /// address: the rendered content area and the visible text of each row.
     pub fn render(
         &mut self,
         frame: &mut Frame<'_>,
@@ -234,7 +234,7 @@ impl Composer {
     ) -> (Rect, Vec<String>) {
         let cursor_visible = !thinking || self.blink.is_visible();
         self.configure(theme);
-        // The block owns the rail gap and content padding, so selection
+        // The block owns the horizontal rail gap and right padding, so selection
         // coordinates and text wrapping use the exact rendered content area.
         let block = prompt_block(theme);
         let inner = block.inner(area);
@@ -548,7 +548,7 @@ fn next_grapheme_width(line: &str, col: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Composer, ComposerAction};
+    use super::{Composer, ComposerAction, prompt_block};
     use crate::theme::Theme;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use ratatui::Terminal;
@@ -566,7 +566,7 @@ mod tests {
         thinking: bool,
     ) -> Vec<ratatui::style::Color> {
         let theme = Theme::default();
-        let backend = TestBackend::new(40, 7);
+        let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).expect("test terminal should build");
         terminal
             .draw(|frame| {
@@ -576,7 +576,7 @@ mod tests {
                         x: 0,
                         y: 0,
                         width: 40,
-                        height: 7,
+                        height: 6,
                     },
                     theme,
                     thinking,
@@ -648,10 +648,11 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_uses_a_theme_background_and_only_a_thick_left_border() {
+    fn the_prompt_uses_vertical_padding_and_a_narrow_rail() {
         let theme = Theme::default();
         let mut composer = Composer::new();
-        let backend = TestBackend::new(40, 7);
+        composer.set_text("edge text");
+        let backend = TestBackend::new(40, 6);
         let mut terminal = Terminal::new(backend).expect("test terminal should build");
 
         terminal
@@ -662,7 +663,7 @@ mod tests {
                         x: 0,
                         y: 0,
                         width: 40,
-                        height: 7,
+                        height: 6,
                     },
                     theme,
                     false,
@@ -681,7 +682,7 @@ mod tests {
         );
         assert_eq!(
             buffer
-                .cell((1, 1))
+                .cell((1, 0))
                 .expect("left gap should be inside the prompt")
                 .bg,
             theme.background_element,
@@ -689,27 +690,33 @@ mod tests {
         );
         assert_eq!(
             buffer
-                .cell((10, 1))
-                .expect("prompt content should be rendered")
-                .bg,
-            theme.background_element,
-            "the prompt content should use the active theme background"
+                .cell((2, 1))
+                .expect("prompt content should start below top padding")
+                .symbol(),
+            "e",
+            "top padding should preserve the prompt content position"
         );
         assert_eq!(
             buffer
-                .cell((10, 0))
-                .expect("top padding should be rendered")
+                .cell((10, 2))
+                .expect("middle prompt content should be rendered")
                 .bg,
             theme.background_element,
-            "the prompt should have top padding"
+            "middle rows should keep the prompt's normal background"
         );
         assert_eq!(
             buffer
-                .cell((10, 6))
+                .cell((10, 5))
                 .expect("bottom padding should be rendered")
                 .bg,
             theme.background_element,
-            "the prompt should have bottom padding"
+            "the prompt should include bottom padding"
+        );
+        let inner = prompt_block(theme).inner(Rect::new(0, 0, 40, 6));
+        assert_eq!(inner.y, 1, "content should start below top padding");
+        assert_eq!(
+            inner.height, 4,
+            "the prompt should retain four content rows"
         );
         assert_eq!(
             buffer
