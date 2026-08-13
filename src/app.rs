@@ -35,6 +35,7 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatalogDialog {
@@ -50,6 +51,8 @@ pub(crate) struct TimelineEntry {
     pub(crate) text: String,
     pub(crate) created: i64,
 }
+
+const CTRL_C_DOUBLE_PRESS_WINDOW: Duration = Duration::from_millis(750);
 
 pub struct App {
     pub client: Arc<ApiClient>,
@@ -67,6 +70,9 @@ pub struct App {
     pub integrations: IntegrationState,
     pub overlay: Option<OverlayState>,
     prompt_panel_return: Option<usize>,
+    /// The most recent Ctrl-C press, used to distinguish a clear from a
+    /// deliberate second press to quit.
+    last_ctrl_c_at: Option<Instant>,
 }
 
 impl App {
@@ -102,6 +108,7 @@ impl App {
             integrations: IntegrationState::default(),
             overlay: None,
             prompt_panel_return: None,
+            last_ctrl_c_at: None,
         }
     }
 
@@ -166,6 +173,15 @@ impl App {
     }
 
     fn handle_terminal_event(&mut self, event: Event) -> Vec<Effect> {
+        let is_ctrl_c_press = matches!(
+            &event,
+            Event::Key(key) if key.kind == KeyEventKind::Press && is_ctrl_c(key)
+        );
+        let is_key_release = matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release);
+        if !is_ctrl_c_press && !is_key_release {
+            // Any other terminal input breaks the consecutive Ctrl-C gesture.
+            self.last_ctrl_c_at = None;
+        }
         match event {
             Event::Key(key) => self.handle_key(key),
             Event::Paste(text) => {
@@ -246,9 +262,30 @@ impl App {
         // and closes overlays, and swallowing it here would make dismissing a
         // highlight silently cost the user one of those.
         self.selection.clear();
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return vec![Effect::Quit];
+        if is_ctrl_c(&key) {
+            let now = Instant::now();
+            if self
+                .last_ctrl_c_at
+                .is_some_and(|last| now.duration_since(last) <= CTRL_C_DOUBLE_PRESS_WINDOW)
+            {
+                self.last_ctrl_c_at = None;
+                return vec![Effect::Quit];
+            }
+
+            self.last_ctrl_c_at = Some(now);
+            self.prompt.composer.clear();
+            // Clear autocomplete state along with the draft, but leave any
+            // explicit dialog open because Ctrl-C's first press only clears
+            // the prompt input.
+            if matches!(
+                self.overlay,
+                Some(OverlayState::Slash { .. } | OverlayState::Mention { .. })
+            ) {
+                self.overlay = None;
+            }
+            return Vec::new();
         }
+        self.last_ctrl_c_at = None;
         if key.code == KeyCode::Char('?')
             && !key
                 .modifiers
@@ -4958,6 +4995,10 @@ fn is_collapse_blocks_key(key: KeyEvent) -> bool {
         && matches!(key.code, KeyCode::Char('b' | 'B'))
 }
 
+fn is_ctrl_c(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
 fn parse_session(value: &Value) -> Option<Session> {
     serde_json::from_value(value.clone()).ok()
 }
@@ -5007,6 +5048,49 @@ mod tests {
         })
         .expect("test client should build");
         App::new_for_tests(Arc::new(client))
+    }
+
+    #[test]
+    fn first_ctrl_c_clears_prompt_and_second_ctrl_c_quits() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.prompt.composer.set_text("draft prompt");
+
+        let first = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(first.is_empty());
+        assert!(app.prompt.composer.is_empty());
+
+        let second = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(matches!(second.as_slice(), [Effect::Quit]));
+    }
+
+    #[test]
+    fn another_key_breaks_the_ctrl_c_double_press() {
+        let mut app = app();
+        app.session.screen = Screen::Session;
+        app.prompt.composer.set_text("draft prompt");
+
+        app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        ))));
+
+        let effects = app.update(AppMsg::Terminal(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))));
+        assert!(effects.is_empty());
+        assert!(app.prompt.composer.is_empty());
     }
 
     #[test]

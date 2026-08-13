@@ -422,7 +422,8 @@ Home:
 - `Delete` / `d`: delete the selected session after confirmation
 - `a`: show archived sessions
 - `A`: show active sessions
-- `q` or `Ctrl-C`: quit
+- `q`: quit
+- `Ctrl-C`: clear the prompt input; press it again within 750 ms to quit
 
 Session:
 
@@ -462,7 +463,7 @@ Session:
 - Prompt panel: `d`, `x`, or `Delete` removes the selected attachment or subtask; selected file parts show safe text previews or binary metadata
 - Tool overrides: cycle each tool through `default`, `on`, and `off`; add custom tool IDs or clear all overrides
 - `Ctrl-Shift-B`: collapse or expand reasoning and tool details
-- `Ctrl-C`: quit
+- `Ctrl-C`: clear the prompt input; press it again within 750 ms to quit
 
 Session diff overlay (Command palette: `Open Session Diff`):
 

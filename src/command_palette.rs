@@ -388,9 +388,9 @@ pub fn all_commands() -> Vec<Command> {
         Command {
             id: "quit",
             name: "Quit",
-            description: "Exit the application",
+            description: "Exit the application (press Ctrl-C twice)",
             category: CommandCategory::Help,
-            keybinding: Some("Ctrl-C / q"),
+            keybinding: Some("Ctrl-C twice / q"),
         },
     ]
 }

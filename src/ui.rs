@@ -1408,7 +1408,7 @@ fn draw_help_dialog(frame: &mut Frame<'_>, theme: Theme) {
         "Sessions: F2/e rename  Delete/d remove  Ctrl-E export",
         "Attachments: Ctrl-Shift-U add  Ctrl-Shift-Backspace remove",
         "Prompt: Ctrl-Shift-T subtask  Ctrl-Shift-O options",
-        "Ctrl-P command palette  Ctrl-C quit",
+        "Ctrl-P command palette  Ctrl-C clear prompt  Ctrl-C twice quit",
         "",
         "Esc close",
     ]
